@@ -47,45 +47,76 @@ func (h *Handler) SetupRoutes(mux *http.ServeMux) {
 
 // HandleWebSocket handles WebSocket connections for P2P communication
 func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Log detailed debug information
+	log.Printf("🔍 DEBUG: WebSocket connection request received")
+	log.Printf("🔍 DEBUG: URL path: %s", r.URL.Path)
+	log.Printf("🔍 DEBUG: Remote address: %s", r.RemoteAddr)
+	log.Printf("🔍 DEBUG: Headers: %v", r.Header)
+
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			return true // Allow all connections for simplicity
 		},
 	}
 
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("Error upgrading connection to WebSocket: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	// Check request origin
-	origin := r.Header.Get("Origin")
-
 	// If this is a P2P connection from another Gping, handle it differently
 	// For simplicity, we'll use the URL path to determine the connection type
 	if r.URL.Path == "/ws/p2p" {
-		log.Printf("P2P connection established from: %s", origin)
+		log.Printf("🔍 DEBUG: Upgrading as P2P connection")
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("Error upgrading connection to WebSocket for P2P: %v", err)
+			return
+		}
+		// For P2P connections, don't use defer conn.Close() since the P2P handler will manage the connection
+
+		origin := r.Header.Get("Origin")
+		remoteIP := r.RemoteAddr
+		log.Printf("🔍 DEBUG: P2P connection established from: %s (IP: %s)", origin, remoteIP)
+
+		// Pass to P2P connection handler
 		h.handleP2PConnection(conn)
 		return
 	}
 
 	// Otherwise, this is a client connection for RPC
-	log.Printf("RPC client connection established from: %s", origin)
+	log.Printf("🔍 DEBUG: Upgrading as RPC connection")
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Error upgrading connection to WebSocket for RPC: %v", err)
+		return
+	}
+	// For RPC connections, use defer conn.Close() since this method will return
+	defer conn.Close()
+
+	origin := r.Header.Get("Origin")
+	log.Printf("🔍 DEBUG: RPC client connection established from: %s", origin)
 	h.handleRPCConnection(conn)
 }
 
 // HandleP2PConnection handles a WebSocket connection for P2P communication
 func (h *Handler) handleP2PConnection(conn *websocket.Conn) {
-	// This would be handled by the P2P network
-	for {
-		_, _, err := conn.ReadMessage()
-		if err != nil {
-			log.Printf("Error reading from P2P WebSocket: %v", err)
-			break
-		}
-	}
+	// Extract the remote address for logging
+	remoteAddr := conn.RemoteAddr().String()
+	log.Printf("🔌 P2P connection handling started for: %s", remoteAddr)
+
+	// Initialize a temporary address for this connection
+	// We'll use the address from the first received message later
+	tempAddr := fmt.Sprintf("temp-%s", remoteAddr)
+
+	log.Printf("🔌 Adding temporary connection with ID: %s", tempAddr)
+
+	// Add this connection to the P2P network with a temporary address
+	h.p2pNetwork.AddTempConnection(conn, tempAddr)
+
+	// DO NOT close the connection here - the P2P network will handle it
+
+	// Let the P2P network handle the rest of the message receiving
+	log.Printf("✅ P2P connection handed over to P2P network handler for: %s", tempAddr)
+
+	// Wait here instead of returning immediately to prevent the connection from being closed
+	// This is necessary because the defer conn.Close() in handleWebSocket would execute otherwise
+	select {} // Block forever
 }
 
 // HandleRPCConnection handles a WebSocket connection for RPC communication
