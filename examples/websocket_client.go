@@ -192,7 +192,7 @@ func (c *GpingWebSocketClient) GetLocation(ctx context.Context, ip string) (*Loc
 	handler := c.RegisterRequest(id)
 	defer c.UnregisterRequest(id)
 
-	// 요청 ID도 추가
+	// Also add request ID
 	requestId := fmt.Sprintf("req-%s", id)
 
 	// Create the request
@@ -225,13 +225,13 @@ func (c *GpingWebSocketClient) GetLocation(ctx context.Context, ip string) (*Loc
 	// Wait for the response
 	select {
 	case result := <-handler.Resp:
-		// 응답을 LocationResponse 구조체로 변환
+		// Convert response to LocationResponse struct
 		var response LocationResponse
 		if err := json.Unmarshal(result, &response); err != nil {
 			return nil, fmt.Errorf("error unmarshaling location response: %w", err)
 		}
 
-		// 응답에 RequestId가 없으면 우리가 보낸 ID로 설정
+		// If response has no RequestId, set it to our ID
 		if response.RequestId == "" {
 			response.RequestId = requestId
 		}
@@ -449,6 +449,50 @@ func (c *GpingHTTPClient) SendResult(ctx context.Context, result TpingResultRequ
 	return nil
 }
 
+// GetLocationREST calls the RPC get_location method via REST API
+func (c *GpingHTTPClient) GetLocationREST(ctx context.Context, ip string) (*LocationResponse, error) {
+	url := fmt.Sprintf("%s/rpc/get_location", c.BaseURL)
+
+	// Create request ID
+	requestId := fmt.Sprintf("req-%d", time.Now().UnixNano())
+
+	// Create the request
+	req := LocationRequest{
+		IP:        ip,
+		RequestId: requestId,
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, fmt.Errorf("error creating HTTP request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("error sending HTTP request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, body)
+	}
+
+	var response LocationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("error decoding response: %w", err)
+	}
+
+	return &response, nil
+}
+
 // SendTpingData sends Tping data
 func (c *GpingWebSocketClient) SendTpingData(ctx context.Context, gps string, time uint, address string) (json.RawMessage, error) {
 	id := c.GenerateMessageID()
@@ -529,6 +573,20 @@ func main() {
 		cancel()
 	}()
 
+	// Choose which method to use
+	if len(os.Args) > 1 && os.Args[1] == "rest" {
+		// Use REST API to get location
+		log.Printf("Using REST API to get location for IP: %s", ipAddress)
+		response, err := httpClient.GetLocationREST(ctx, ipAddress)
+		if err != nil {
+			log.Fatalf("Error getting location via REST: %v", err)
+		}
+		log.Printf("Location for IP %s via REST: Latitude=%s, Longitude=%s, SP=%s, RequestId=%s",
+			ipAddress, response.Latitude, response.Longitude, response.SPAddress, response.RequestId)
+		return
+	}
+
+	// Default: Use WebSocket with polling
 	log.Printf("Starting location request for IP: %s, wallet: %s", ipAddress, walletAddress)
 	response, err := GetLocationWithPolling(wsClient, httpClient, ctx, ipAddress, walletAddress)
 	if err != nil {

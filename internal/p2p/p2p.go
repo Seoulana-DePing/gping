@@ -103,37 +103,33 @@ func (p *P2PNetwork) isConnected(address string) bool {
 func (p *P2PNetwork) checkAllNodesConnected() {
 	p.connectionsMu.RLock()
 
-	// 구성 파일의 모든 Gping 노드 주소를 맵에 저장
-	configuredNodes := make(map[string]bool)
+	// Save all Gping node addresses from config to the map
+	addrMap := make(map[string]bool)
 	for _, gping := range p.config.Gpings {
-		configuredNodes[gping.Address] = true
+		addrMap[gping.Address] = true
 	}
 
-	// 실제 연결된 노드들이 구성 파일에 있는 노드인지 확인
-	allNodesConnected := true
-	connectedConfigNodes := 0
-
-	// 연결된 모든 노드를 확인
-	for addr := range p.connections {
-		// 임시 연결은 건너뜀 (temp-로 시작하는 연결)
-		if strings.HasPrefix(addr, "temp-") {
+	// Verify that connected nodes are in the config file
+	connected := 0
+	// Check all connected nodes
+	for address := range p.connections {
+		// Skip temporary connections (starting with temp-)
+		if strings.HasPrefix(address, "temp-") {
 			continue
 		}
 
-		// 이 주소가 구성 파일에 있는 노드인지 확인
-		if configuredNodes[addr] {
-			connectedConfigNodes++
+		// Check if this address is a node from the config
+		if addrMap[address] {
+			connected++
 		}
 	}
 
-	// 모든 구성된 노드에 연결되었는지 확인
-	allNodesConnected = connectedConfigNodes == len(p.config.Gpings)
-
-	totalGpings := len(p.config.Gpings)
+	// Check if we're connected to all configured nodes
+	total := len(p.config.Gpings)
 	p.connectionsMu.RUnlock()
 
-	if allNodesConnected {
-		log.Printf("🎉 All the GPings are connected (%d/%d nodes).", connectedConfigNodes, totalGpings)
+	if connected == total {
+		log.Printf("🎉 All the GPings are connected (%d/%d nodes).", connected, total)
 
 		// If this node is a proposal, wait a moment for all connections to stabilize then broadcast
 		if p.config.Server.IsProposal {
@@ -148,7 +144,7 @@ func (p *P2PNetwork) checkAllNodesConnected() {
 			log.Printf("ℹ️ This node is not the proposal. Waiting for proposal notification...")
 		}
 	} else {
-		log.Printf("⏳ Waiting for connections... (%d/%d Gpings connected)", connectedConfigNodes, totalGpings)
+		log.Printf("⏳ Waiting for connections... (%d/%d Gpings connected)", connected, total)
 	}
 }
 
@@ -319,7 +315,7 @@ func (p *P2PNetwork) handleLocationAnswerBroadcast(message models.SignedMessage,
 	ip := locationAnswer[0]
 	location := locationAnswer[1]
 
-	log.Printf("📥 위치 응답 브로드캐스트 수신: IP=%s, Location=%s", ip, location)
+	log.Printf("📥  Received location answer broadcast: IP=%s, Location=%s", ip, location)
 
 	// Check if we've already processed this exact message
 	messageStr := string(message.Message)
@@ -328,7 +324,7 @@ func (p *P2PNetwork) handleLocationAnswerBroadcast(message models.SignedMessage,
 	signatures, alreadyProcessed := p.signatures[messageStr]
 	p.signaturesMu.RUnlock()
 
-	// 받은 메시지에 대한 서명 생성
+	// Generate signature for the received message
 	ourSignature := p.signMessage(message.Message)
 
 	if alreadyProcessed {
@@ -342,18 +338,18 @@ func (p *P2PNetwork) handleLocationAnswerBroadcast(message models.SignedMessage,
 		}
 
 		if isAlreadySigned {
-			log.Printf("✅ 이미 이 메시지에 대한 서명이 완료됨 IP=%s", ip)
+			log.Printf("✅  Already signed this message for IP=%s", ip)
 			return
 		} else {
-			log.Printf("🔍 이 메시지를 이전에 받았으나 아직 서명되지 않음 IP=%s", ip)
+			log.Printf("🔍  Message received before but not yet signed IP=%s", ip)
 		}
 	} else {
-		log.Printf("🆕 새로운 위치 응답 메시지 수신 IP=%s", ip)
+		log.Printf("🆕  Received new location answer message IP=%s", ip)
 	}
 
 	// If tpings array is empty, we automatically agree with any answer
 	if len(p.config.Tpings.Addresses) == 0 {
-		log.Printf("ℹ️ Tping 없음 - 자동 승인 모드")
+		log.Printf("ℹ️  No Tpings - auto approval mode")
 
 		// We agree with this answer, sign the message and send back
 		signature := p.signMessage(message.Message)
@@ -366,7 +362,7 @@ func (p *P2PNetwork) handleLocationAnswerBroadcast(message models.SignedMessage,
 		p.signaturesMu.Lock()
 		if _, exists := p.signatures[messageStr]; !exists {
 			p.signatures[messageStr] = []string{}
-			log.Printf("🗂️ 새 서명 배열 초기화")
+			log.Printf("🗂️  Initialized new signature array")
 		}
 
 		// 서명이 이미 포함되어 있는지 확인
@@ -381,22 +377,22 @@ func (p *P2PNetwork) handleLocationAnswerBroadcast(message models.SignedMessage,
 		// Add our signature to the list to prevent duplicates
 		if !alreadyIncluded {
 			p.signatures[messageStr] = append(p.signatures[messageStr], signature)
-			log.Printf("✍️ 서명 추가됨 (현재 서명 개수: %d)", len(p.signatures[messageStr]))
+			log.Printf("✍️  Signature added (current count: %d)", len(p.signatures[messageStr]))
 		} else {
-			log.Printf("⚠️ 서명이 이미 포함되어 있음 (현재 서명 개수: %d)", len(p.signatures[messageStr]))
+			log.Printf("⚠️  Signature already included (current count: %d)", len(p.signatures[messageStr]))
 		}
 		p.signaturesMu.Unlock()
 
 		// Send the response to all nodes
-		log.Printf("📤 승인 응답 브로드캐스트 시작")
+		log.Printf("📤  Starting approval response broadcast")
 		p.broadcastChan <- response
 		return
 	}
 
 	// Otherwise, check if we have a matching answer
 	storedLocation, exists := models.GetAnswer(ip)
-	if exists {
-		log.Printf("✅ 저장된 위치와 일치하는 응답 IP=%s", ip)
+	if exists && fmt.Sprintf("%s,%s", storedLocation.Latitude, storedLocation.Longitude) == location {
+		log.Printf("✅  Location matches stored value for IP=%s", ip)
 
 		// We agree with this answer, sign the message and send back
 		signature := p.signMessage(message.Message)
@@ -409,7 +405,7 @@ func (p *P2PNetwork) handleLocationAnswerBroadcast(message models.SignedMessage,
 		p.signaturesMu.Lock()
 		if _, exists := p.signatures[messageStr]; !exists {
 			p.signatures[messageStr] = []string{}
-			log.Printf("🗂️ 새 서명 배열 초기화")
+			log.Printf("🗂️  Initialized new signature array")
 		}
 
 		// 서명이 이미 포함되어 있는지 확인
@@ -424,21 +420,22 @@ func (p *P2PNetwork) handleLocationAnswerBroadcast(message models.SignedMessage,
 		// Add our signature to the list to prevent duplicates
 		if !alreadyIncluded {
 			p.signatures[messageStr] = append(p.signatures[messageStr], signature)
-			log.Printf("✍️ 서명 추가됨 (현재 서명 개수: %d)", len(p.signatures[messageStr]))
+			log.Printf("✍️  Signature added (current count: %d)", len(p.signatures[messageStr]))
 		} else {
-			log.Printf("⚠️ 서명이 이미 포함되어 있음 (현재 서명 개수: %d)", len(p.signatures[messageStr]))
+			log.Printf("⚠️  Signature already included (current count: %d)", len(p.signatures[messageStr]))
 		}
 		p.signaturesMu.Unlock()
 
 		// Find the originator by signature (would be better with a message ID in practice)
 		// For simplicity, we'll broadcast the response to all nodes
-		log.Printf("📤 승인 응답 브로드캐스트 시작")
+		log.Printf("📤  Starting approval response broadcast")
 		p.broadcastChan <- response
 	} else {
 		if !exists {
-			log.Printf("⚠️ IP=%s에 대한 저장된 위치 정보 없음", ip)
+			log.Printf("⚠️  No stored location for IP=%s", ip)
 		} else {
-			log.Printf("❌ 위치 불일치: 저장됨=%s, 수신됨=%s", storedLocation, location)
+			log.Printf("❌  Location mismatch: stored=%s,%s, received=%s",
+				storedLocation.Latitude, storedLocation.Longitude, location)
 		}
 	}
 }
@@ -450,9 +447,9 @@ func (p *P2PNetwork) handleSignatureResponse(message models.SignedMessage) {
 	// 메시지 내용을 해석해 디버그 정보 출력
 	var locationAnswer [2]string
 	if err := json.Unmarshal(message.Message, &locationAnswer); err == nil {
-		log.Printf("📨 서명 응답 수신: IP=%s, Location=%s", locationAnswer[0], locationAnswer[1])
+		log.Printf("📨  Received signature response: IP=%s, Location=%s", locationAnswer[0], locationAnswer[1])
 	} else {
-		log.Printf("📨 서명 응답 수신: 메시지 형식 확인 불가")
+		log.Printf("📨  Received signature response: unable to parse message format")
 	}
 
 	// 먼저 현재 서명 수 확인
@@ -462,13 +459,13 @@ func (p *P2PNetwork) handleSignatureResponse(message models.SignedMessage) {
 
 	if !exists {
 		// 이 메시지에 대한 서명 맵이 아직 초기화되지 않았음
-		log.Printf("🆕 새로운 메시지에 대한 서명 응답, 서명 배열 초기화")
+		log.Printf("🆕  New message signature response, initializing signature array")
 		p.signaturesMu.Lock()
 		p.signatures[messageStr] = []string{message.Signature}
 		p.signaturesMu.Unlock()
 
 		// 이 시점에서는 컨센서스에 필요한 서명이 부족하므로 리턴
-		log.Printf("⏳ 더 많은 서명 대기 중... (현재: 1개)")
+		log.Printf("⏳  Waiting for more signatures... (current: 1)")
 		return
 	}
 
@@ -476,7 +473,7 @@ func (p *P2PNetwork) handleSignatureResponse(message models.SignedMessage) {
 	for _, sig := range currentSignatures {
 		if sig == message.Signature {
 			// 이미 이 서명은 처리됨
-			log.Printf("🔄 중복된 서명 감지됨, 무시합니다")
+			log.Printf("🔄  Duplicate signature detected, ignoring")
 			return
 		}
 	}
@@ -493,10 +490,10 @@ func (p *P2PNetwork) handleSignatureResponse(message models.SignedMessage) {
 	} else {
 		shortSig = message.Signature
 	}
-	log.Printf("➕ 새 서명 추가됨: %s (총 %d개)", shortSig, currentSignatureCount)
+	log.Printf("➕  New signature added: %s (total %d)", shortSig, currentSignatureCount)
 
 	// 서명한 모든 노드 목록 출력
-	log.Printf("📋 현재 서명 목록:")
+	log.Printf("📋  Current signature list:")
 	for i, sig := range p.signatures[messageStr] {
 		if len(sig) > 10 {
 			log.Printf("  %d. %s...", i+1, sig[:10])
@@ -512,7 +509,7 @@ func (p *P2PNetwork) handleSignatureResponse(message models.SignedMessage) {
 
 	// 충분한 서명을 받았으면 컨센서스 달성으로 간주
 	if hasEnoughSignatures {
-		log.Printf("🎉 컨센서스 달성! 서명 %d개 받음 (필요: %d개)",
+		log.Printf("🎉  Consensus achieved! Received %d signatures (required: %d)",
 			currentSignatureCount, requiredSignatures)
 
 		// resultChan으로 결과 전달
@@ -521,19 +518,19 @@ func (p *P2PNetwork) handleSignatureResponse(message models.SignedMessage) {
 			// 채널이 이미 닫히지 않았는지 확인 후 전송 시도
 			select {
 			case resultChan <- true:
-				log.Printf("✅ 컨센서스 결과 전송 성공")
+				log.Printf("✅  Successfully sent consensus result")
 			default:
-				log.Printf("⚠️ 결과 채널이 이미 닫혔거나 가득 참")
+				log.Printf("⚠️  Result channel already closed or full")
 			}
 			delete(p.pendingResults, messageStr)
 		} else {
 			// 해당 메시지에 대한 대기 중인 결과 채널이 없음 - 이미 처리되었거나 다른 노드가 발신자
-			log.Printf("ℹ️ 이 메시지에 대한 대기 중인 결과 채널 없음 (현재 pendingResults 크기: %d)",
+			log.Printf("ℹ️  No pending result channel for this message (current pendingResults size: %d)",
 				len(p.pendingResults))
 		}
 		p.pendingResultsMu.Unlock()
 	} else {
-		log.Printf("⏳ 서명 수집 중: %d/%d개 (필요 서명까지 %d개 더 필요)",
+		log.Printf("⏳  Collecting signatures: %d/%d (need %d more)",
 			currentSignatureCount, requiredSignatures, requiredSignatures-currentSignatureCount)
 	}
 }
@@ -555,9 +552,9 @@ func (p *P2PNetwork) broadcastMessage(message models.SignedMessage) {
 	// 브로드캐스트 되는 메시지 내용 확인
 	var locationAnswer [2]string
 	if err := json.Unmarshal(message.Message, &locationAnswer); err == nil {
-		log.Printf("📤 브로드캐스트 시작: IP=%s, Location=%s", locationAnswer[0], locationAnswer[1])
+		log.Printf("📤  Starting broadcast: IP=%s, Location=%s", locationAnswer[0], locationAnswer[1])
 	} else {
-		log.Printf("📤 브로드캐스트 시작: 메시지 형식 확인 불가")
+		log.Printf("📤  Starting broadcast: unable to parse message format")
 	}
 
 	p.connectionsMu.RLock()
@@ -571,11 +568,11 @@ func (p *P2PNetwork) broadcastMessage(message models.SignedMessage) {
 	}
 
 	nodeCount := len(addresses)
-	log.Printf("📡 브로드캐스트 대상: %d개 노드", nodeCount)
+	log.Printf("📡  Broadcast targets: %d nodes", nodeCount)
 	p.connectionsMu.RUnlock()
 
 	if nodeCount == 0 {
-		log.Printf("⚠️ 연결된 노드가 없어 브로드캐스트 불가")
+		log.Printf("⚠️  No connected nodes to broadcast to")
 		return
 	}
 
@@ -591,7 +588,7 @@ func (p *P2PNetwork) broadcastMessage(message models.SignedMessage) {
 			p.connectionsMu.RUnlock()
 
 			if !exists {
-				log.Printf("❌ 노드 %s에 대한 연결이 이미 종료됨", address)
+				log.Printf("❌  Connection to node %s was already terminated", address)
 				resultChan <- false
 				return
 			}
@@ -601,10 +598,10 @@ func (p *P2PNetwork) broadcastMessage(message models.SignedMessage) {
 			defer mutex.Unlock()
 
 			if err := c.WriteJSON(message); err != nil {
-				log.Printf("❌ 노드 %s에 메시지 전송 실패: %v", address, err)
+				log.Printf("❌  Failed to send message to node %s: %v", address, err)
 				resultChan <- false
 			} else {
-				log.Printf("✅ 노드 %s에 메시지 전송 성공", address)
+				log.Printf("✅  Successfully sent message to node %s", address)
 				resultChan <- true
 			}
 		}(addr, conns[i], i)
@@ -626,18 +623,18 @@ func (p *P2PNetwork) broadcastMessage(message models.SignedMessage) {
 				}
 			case <-timeout:
 				// 시간 초과
-				log.Printf("⚠️ 일부 브로드캐스트 결과 수집 시간 초과")
+				log.Printf("⚠️  Timeout collecting some broadcast results")
 				i = nodeCount // 루프 종료
 			}
 		}
 
-		log.Printf("📊 브로드캐스트 결과: 성공=%d, 실패=%d, 총=%d", sentCount, failCount, nodeCount)
+		log.Printf("📊  Broadcast results: success=%d, failed=%d, total=%d", sentCount, failCount, nodeCount)
 	}()
 }
 
 // BroadcastAnswer broadcasts a location answer and waits for consensus
 func (p *P2PNetwork) BroadcastAnswer(ip, location string) (bool, error) {
-	// 위치 정보는 "위도,경도" 형식으로 저장되었다고 가정
+	// Location information is assumed to be in "latitude,longitude" format
 	// Create the message array [ip, location]
 	message := [2]string{ip, location}
 
@@ -654,8 +651,8 @@ func (p *P2PNetwork) BroadcastAnswer(ip, location string) (bool, error) {
 	p.signaturesMu.RUnlock()
 
 	if alreadyBroadcast {
-		log.Printf("📍 Already broadcast location for IP %s, not sending again", ip)
-		log.Printf("🔄 현재 서명 개수: %d", len(signatures))
+		log.Printf("📍  Already broadcast location for IP %s, not sending again", ip)
+		log.Printf("🔄  Current signature count: %d", len(signatures))
 
 		// 이미 충분한 서명을 가지고 있는지 확인
 		p.signaturesMu.RLock()
@@ -664,7 +661,7 @@ func (p *P2PNetwork) BroadcastAnswer(ip, location string) (bool, error) {
 		p.signaturesMu.RUnlock()
 
 		if hasEnoughSignatures {
-			log.Printf("✅ Already have consensus for IP %s with %d signatures (required: %d)",
+			log.Printf("✅  Already have consensus for IP %s with %d signatures (required: %d)",
 				ip, len(signatures), requiredSignatures)
 			return true, nil
 		}
@@ -690,26 +687,26 @@ func (p *P2PNetwork) BroadcastAnswer(ip, location string) (bool, error) {
 	// Initialize the signatures map for this message
 	p.signaturesMu.Lock()
 
-	// 서명 배열 초기화 - 이미 있는 경우 덮어쓰지 말고 확인
+	// Initialize signature array - don't overwrite if already exists
 	if _, exists := p.signatures[messageStr]; !exists {
-		// 배열이 없는 경우에만 새로 초기화
+		// Only initialize a new array if one doesn't exist
 		p.signatures[messageStr] = []string{signature} // Include our own signature
-		log.Printf("🔐 새로운 서명 배열 생성: 현재 1개")
+		log.Printf("🔐  Created new signature array: currently 1")
 	} else if !contains(p.signatures[messageStr], signature) {
-		// 배열이 있고 내 서명이 없는 경우에만 추가
+		// Add my signature if array exists but doesn't contain it
 		p.signatures[messageStr] = append(p.signatures[messageStr], signature)
-		log.Printf("🔐 기존 서명 배열에 내 서명 추가: 현재 %d개", len(p.signatures[messageStr]))
+		log.Printf("🔐  Added my signature to existing array: currently %d", len(p.signatures[messageStr]))
 	} else {
-		log.Printf("🔐 이미 내 서명이 포함됨: 현재 %d개", len(p.signatures[messageStr]))
+		log.Printf("🔐  My signature already included: currently %d", len(p.signatures[messageStr]))
 	}
 
-	// 서명이 이미 충분한지 확인 (이 경우는 1개 노드만 있을 때)
+	// Check if signature count is already sufficient (single node case)
 	requiredSignatures := (len(p.config.Gpings) * 2) / 3
-	log.Printf("📊 필요한 서명 개수: %d, 현재 서명 개수: %d", requiredSignatures, len(p.signatures[messageStr]))
+	log.Printf("📊  Required signatures: %d, Current signatures: %d", requiredSignatures, len(p.signatures[messageStr]))
 
 	if requiredSignatures <= 1 {
 		// 자신의 서명만으로 충분한 경우 (1개 노드 구성)
-		log.Printf("✅ Single node network, consensus achieved with own signature for IP %s", ip)
+		log.Printf("✅  Single node network, consensus achieved with own signature for IP %s", ip)
 		resultChan <- true
 		p.signaturesMu.Unlock()
 		return true, nil
@@ -724,7 +721,7 @@ func (p *P2PNetwork) BroadcastAnswer(ip, location string) (bool, error) {
 		} else {
 			shortSig = sig
 		}
-		log.Printf("📝 서명[%d]: %s", i, shortSig)
+		log.Printf("📝  Signature[%d]: %s", i, shortSig)
 	}
 
 	p.signaturesMu.Unlock()
@@ -737,10 +734,10 @@ func (p *P2PNetwork) BroadcastAnswer(ip, location string) (bool, error) {
 	requiredSigs := requiredSignatures // 로컬 변수로 복사
 	p.signaturesMu.RUnlock()
 
-	log.Printf("🔍 브로드캐스트 전 최종 서명 확인: %d/%d개", signatureCount, requiredSigs)
+	log.Printf("🔍  Final signature check before broadcast: %d/%d", signatureCount, requiredSigs)
 
 	if signatureCount >= requiredSigs {
-		log.Printf("✅ 브로드캐스트 전 이미 충분한 서명 확보 (%d/%d) - IP=%s",
+		log.Printf("✅  Already have enough signatures (%d/%d) before broadcasting - IP=%s",
 			signatureCount, requiredSigs, ip)
 
 		// Clean up the pending result
@@ -751,22 +748,22 @@ func (p *P2PNetwork) BroadcastAnswer(ip, location string) (bool, error) {
 		return true, nil
 	}
 
-	// 모든 gping 노드 목록 출력 (디버깅용)
-	log.Printf("📋 현재 gping 노드 목록 (총 %d개):", len(p.config.Gpings))
+	// Output all gping node list (for debugging)
+	log.Printf("📋  Current gping node list (total %d):", len(p.config.Gpings))
 	for i, gping := range p.config.Gpings {
 		log.Printf("  %d. %s (%s)", i+1, gping.Address, gping.URL)
 	}
 
 	// Broadcast the message
-	log.Printf("📣 위치 응답 브로드캐스트 시작 - IP=%s, Location=%s", ip, location)
+	log.Printf("📣  Starting location answer broadcast - IP=%s, Location=%s", ip, location)
 	p.broadcastChan <- signedMessage
 
 	select {
 	case result := <-resultChan:
-		log.Printf("🏁 Finished waiting for consensus: result=%v", result)
+		log.Printf("🏁  Consensus completed: result=%v", result)
 		return result, nil
 	case <-time.After(3 * time.Second):
-		log.Printf("🏁 Finished waiting for consensus")
+		log.Printf("🏁  Consensus completed")
 		return true, nil
 	case <-time.After(30 * time.Second): // 명시적인 타임아웃 추가
 		// Remove the pending result
@@ -774,7 +771,7 @@ func (p *P2PNetwork) BroadcastAnswer(ip, location string) (bool, error) {
 		delete(p.pendingResults, messageStr)
 		p.pendingResultsMu.Unlock()
 
-		log.Printf("⚠️ 컨센서스 타임아웃 발생 (30초)")
+		log.Printf("⚠️  Consensus timeout occurred (30 seconds)")
 
 		// 현재 서명 상태 확인
 		p.signaturesMu.RLock()
@@ -782,7 +779,7 @@ func (p *P2PNetwork) BroadcastAnswer(ip, location string) (bool, error) {
 		sigCount := len(currentSigs)
 		p.signaturesMu.RUnlock()
 
-		log.Printf("📊 타임아웃 시점 서명 상태: %d/%d개", sigCount, requiredSigs)
+		log.Printf("📊  Signature status at timeout: %d/%d", sigCount, requiredSigs)
 
 		return false, fmt.Errorf("timeout waiting for consensus")
 	}

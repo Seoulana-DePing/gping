@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/Seoulana-DePing/gping/internal/config"
 	"github.com/Seoulana-DePing/gping/internal/models"
@@ -42,6 +43,9 @@ func (r *RESTHandler) SetupRoutes(router *gin.Engine) {
 
 	// Result endpoint to submit Tping data
 	router.POST("/result", r.handleResult)
+
+	// RPC method implementation as REST endpoint
+	router.POST("/rpc/get-location", r.handleRPCGetLocation)
 
 	// API group with v1 prefix
 	v1 := router.Group("/api/v1")
@@ -83,7 +87,6 @@ func (r *RESTHandler) handleGetLocation(c *gin.Context) {
 
 	// Check if we already have an answer for this IP
 	if location, exists := models.GetAnswer(req.IP); exists {
-
 		c.JSON(http.StatusOK, gin.H{
 			"ip":         req.IP,
 			"location":   location,
@@ -93,7 +96,7 @@ func (r *RESTHandler) handleGetLocation(c *gin.Context) {
 			"cached":     true,
 			"request_id": req.RequestId,
 		})
-		log.Printf("Responded with cached location for IP: %s = %s", req.IP, location)
+		log.Printf("Responded with cached location for IP: %s = %s,%s", req.IP, location.Latitude, location.Longitude)
 		return
 	}
 
@@ -162,6 +165,8 @@ func (r *RESTHandler) handlePolling(c *gin.Context) {
 	// Get the latest requested IPs
 	ips := models.GetRequestedIPs()
 
+	log.Printf("Polling IPs: %v", ips)
+
 	// Return the IPs as JSON
 	if len(ips) > 0 {
 		c.JSON(http.StatusOK, gin.H{
@@ -184,6 +189,8 @@ func (r *RESTHandler) handleResult(c *gin.Context) {
 		return
 	}
 
+	log.Printf("Result received for IP: %s, WalletAddress: %s, ResponseTime: %f, Latitude: %f, Longitude: %f", req.IP, req.WalletAddress, req.ResponseTime, req.Latitude, req.Longitude)
+
 	// Create a TpingAnswer from the request
 	answer := models.TpingAnswer{
 		ResponseTime: req.ResponseTime,
@@ -198,6 +205,88 @@ func (r *RESTHandler) handleResult(c *gin.Context) {
 		"status":  "success",
 		"message": "Result received",
 	})
+}
+
+// HandleRPCGetLocation handles the RPC get_location method as a REST endpoint
+func (r *RESTHandler) handleRPCGetLocation(c *gin.Context) {
+	var req models.LocationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid request format",
+		})
+		return
+	}
+
+	// Add the IP to the requested IPs global variable for polling
+	models.AddRequestedIP(req.IP)
+
+	// Check if we already have an answer for this IP
+	if location, exists := models.GetAnswer(req.IP); exists {
+		// Convert location to response format
+		log.Printf("Location for IP %s: %s,%s", req.IP, location.Latitude, location.Longitude)
+		response := models.LocationResponse{
+			Latitude:  location.Latitude,
+			Longitude: location.Longitude,
+			SPAddress: r.config.Key.Address,
+			RequestId: req.RequestId,
+		}
+
+		c.JSON(http.StatusOK, response)
+		log.Printf("Responded with cached location for IP: %s = %s,%s", req.IP, location.Latitude, location.Longitude)
+		return
+	}
+
+	// Start a new goroutine to process the location request if not already processing
+	if !models.MarkIPAsProcessing(req.IP) {
+		// This IP is already being processed
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"error":      "Request for this IP is already being processed",
+			"request_id": req.RequestId,
+		})
+		return
+	}
+
+	// Create a response channel
+	respChan := make(chan *models.LocationResponse, 1)
+	errChan := make(chan error, 1)
+
+	// Process location request in background
+	go func() {
+		isSuccess, loc, err := r.handler.newProcessLocationRequest(req.IP, req.RequestId)
+		if err != nil {
+			errChan <- err
+			return
+		}
+
+		if isSuccess && loc != nil {
+			// Create the response
+			resp := &models.LocationResponse{
+				Latitude:  loc.Latitude,
+				Longitude: loc.Longitude,
+				SPAddress: r.config.Key.Address,
+				RequestId: req.RequestId,
+			}
+			respChan <- resp
+		} else {
+			errChan <- fmt.Errorf("failed to process location request")
+		}
+	}()
+
+	// Wait for processing with timeout
+	select {
+	case resp := <-respChan:
+		c.JSON(http.StatusOK, resp)
+	case err := <-errChan:
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":      err.Error(),
+			"request_id": req.RequestId,
+		})
+	case <-time.After(30 * time.Second): // Same timeout as in RPC method
+		c.JSON(http.StatusRequestTimeout, gin.H{
+			"error":      "timeout waiting for location",
+			"request_id": req.RequestId,
+		})
+	}
 }
 
 // StartServer starts the REST API server

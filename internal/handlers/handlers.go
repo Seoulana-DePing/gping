@@ -175,7 +175,7 @@ func (h *Handler) handleGetLocation(w http.ResponseWriter, r *http.Request) {
 
 	// Check if we already have an answer for this IP
 	if location, exists := models.GetAnswer(req.IP); exists {
-		// 요청에서 받은 RequestId를 응답에 포함
+		// Include the RequestId from the request in the response
 		h.sendLocationResponseWithRequestId(w, fmt.Sprintf("%s,%s", location.Latitude, location.Longitude), req.RequestId)
 		return
 	}
@@ -194,7 +194,7 @@ func (h *Handler) handleGetLocation(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":     "processing",
 		"message":    "Location request is being processed",
-		"request_id": req.RequestId, // 요청에서 받은 RequestId 포함
+		"request_id": req.RequestId, // Include RequestId from the request
 	})
 }
 
@@ -367,7 +367,7 @@ func (h *Handler) newProcessLocationRequest(ip, requestId string) (bool, *models
 		log.Printf("Failed to reach consensus for IP: %s", ip)
 	}
 
-	// 저장된 Location 정보 반환
+	// Return stored Location information
 	storedLoc := models.Location{
 		Latitude:  latStr,
 		Longitude: lonStr,
@@ -446,7 +446,7 @@ func (h *Handler) determineBestLocation(ip string) (string, []string) {
 	h.tpingDataMu.RLock()
 	defer h.tpingDataMu.RUnlock()
 
-	// Tping data에서 GPS 정보를 얻는 부분
+	// Get GPS information from Tping data
 	tpings, exists := h.tpingData[ip]
 	if !exists || len(tpings) == 0 {
 		return "", nil
@@ -476,7 +476,7 @@ func (h *Handler) determineBestLocation(ip string) (string, []string) {
 	}
 
 	// Get the location with the lowest response time
-	// GPS 데이터가 "위도,경도" 형식이라고 가정
+	// Assume GPS data is in "latitude,longitude" format
 	bestLocation := tpings[0].GPS
 
 	// Collect Tping addresses
@@ -490,7 +490,7 @@ func (h *Handler) determineBestLocation(ip string) (string, []string) {
 
 // SendLocationResponseWithRequestId sends a location response with the specified RequestId
 func (h *Handler) sendLocationResponseWithRequestId(w http.ResponseWriter, location string, requestId string) {
-	// 위치 정보를 위도/경도로 분할
+	// Split the location information into latitude/longitude
 	parts := strings.Split(location, ",")
 	var latitude, longitude string
 
@@ -498,7 +498,7 @@ func (h *Handler) sendLocationResponseWithRequestId(w http.ResponseWriter, locat
 		latitude = strings.TrimSpace(parts[0])
 		longitude = strings.TrimSpace(parts[1])
 	} else {
-		// 위치 정보가 예상 형식이 아닌 경우에 대한 처리
+		// Handle case where location format is unexpected
 		latitude = location
 		longitude = location
 	}
@@ -506,8 +506,8 @@ func (h *Handler) sendLocationResponseWithRequestId(w http.ResponseWriter, locat
 	resp := models.LocationResponse{
 		Latitude:  latitude,
 		Longitude: longitude,
-		SPAddress: h.vaultAddress, // 기존 Vault 주소를 SPAddress로 사용
-		RequestId: requestId,      // 전달받은 RequestId 사용
+		SPAddress: h.vaultAddress, // Use the existing Vault address as SPAddress
+		RequestId: requestId,      // Use the provided RequestId
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -516,7 +516,7 @@ func (h *Handler) sendLocationResponseWithRequestId(w http.ResponseWriter, locat
 
 // SendLocationResponse sends a location response (legacy version for backward compatibility)
 func (h *Handler) sendLocationResponse(w http.ResponseWriter, location string) {
-	// 기존 호환성을 위해 빈 RequestId로 호출
+	// Call with empty RequestId for backward compatibility
 	h.sendLocationResponseWithRequestId(w, location, "")
 }
 
