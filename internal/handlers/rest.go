@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
 
 	"github.com/Seoulana-DePing/gping/internal/config"
 	"github.com/Seoulana-DePing/gping/internal/models"
@@ -84,26 +83,21 @@ func (r *RESTHandler) handleGetLocation(c *gin.Context) {
 
 	// Check if we already have an answer for this IP
 	if location, exists := models.GetAnswer(req.IP); exists {
-		parts := strings.Split(location, ",")
-		var latitude, longitude string
-		if len(parts) >= 2 {
-			latitude = strings.TrimSpace(parts[0])
-			longitude = strings.TrimSpace(parts[1])
-		}
 
 		c.JSON(http.StatusOK, gin.H{
 			"ip":         req.IP,
 			"location":   location,
-			"latitude":   latitude,
-			"longitude":  longitude,
+			"latitude":   location.Latitude,
+			"longitude":  location.Longitude,
 			"status":     "success",
 			"cached":     true,
 			"request_id": req.RequestId,
 		})
+		log.Printf("Responded with cached location for IP: %s = %s", req.IP, location)
 		return
 	}
 
-	// Start a new goroutine to process the location request
+	// Start a new goroutine to process the location request if not already processing
 	if !models.MarkIPAsProcessing(req.IP) {
 		// This IP is already being processed
 		c.JSON(http.StatusTooManyRequests, gin.H{

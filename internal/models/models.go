@@ -76,13 +76,18 @@ type RPCError struct {
 	Message string `json:"message"`
 }
 
+type Location struct {
+	Latitude  string `json:"latitude"`
+	Longitude string `json:"longitude"`
+}
+
 // Global variables for storing location data and Tping withdrawal information
 var (
 	// Answers maps IP addresses to their determined locations
 	Answers = struct {
 		sync.RWMutex
-		Data map[string]string // map[ipAddress]gpsLocation
-	}{Data: make(map[string]string)}
+		Data map[string]Location // map[ipAddress]gpsLocation
+	}{Data: make(map[string]Location)}
 
 	// TpingWithdrawal stores information about Tpings that contributed data
 	// map[ipAddress][timestamp][]tpingAddresses
@@ -111,14 +116,14 @@ var (
 )
 
 // StoreAnswer stores a determined location for an IP address
-func StoreAnswer(ip, location string) {
+func StoreAnswer(ip, latitude, longitude string) {
 	Answers.Lock()
 	defer Answers.Unlock()
-	Answers.Data[ip] = location
+	Answers.Data[ip] = Location{Latitude: latitude, Longitude: longitude}
 }
 
 // GetAnswer retrieves a stored location for an IP address
-func GetAnswer(ip string) (string, bool) {
+func GetAnswer(ip string) (Location, bool) {
 	Answers.RLock()
 	defer Answers.RUnlock()
 	location, exists := Answers.Data[ip]

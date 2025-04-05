@@ -230,6 +230,12 @@ func (c *GpingWebSocketClient) GetLocation(ctx context.Context, ip string) (*Loc
 		if err := json.Unmarshal(result, &response); err != nil {
 			return nil, fmt.Errorf("error unmarshaling location response: %w", err)
 		}
+
+		// 응답에 RequestId가 없으면 우리가 보낸 ID로 설정
+		if response.RequestId == "" {
+			response.RequestId = requestId
+		}
+
 		return &response, nil
 	case rpcErr := <-handler.Error:
 		return nil, fmt.Errorf("RPC error: %s (code: %d)", rpcErr.Message, rpcErr.Code)
@@ -238,31 +244,23 @@ func (c *GpingWebSocketClient) GetLocation(ctx context.Context, ip string) (*Loc
 	}
 }
 
-// GetLocationWithPolling gets the location for an IP address using WebSocket for the initial request
-// and then polls the REST API for the result
-func (wsClient *GpingWebSocketClient) GetLocationWithPolling(ctx context.Context, httpClient *GpingHTTPClient, ip string, walletAddress string) (*LocationResponse, error) {
-	// Cancel context if it takes too long
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	// Generate a unique request ID
-	requestId := fmt.Sprintf("req-%s", wsClient.GenerateMessageID())
-
-	// Create channels to communicate between goroutines
+// GetLocationWithPolling combines WebSocket and HTTP functionality to get the location
+func (c *GpingWebSocketClient) GetLocationWithPolling(ctx context.Context, httpClient *GpingHTTPClient, ip string, walletAddress string) (*LocationResponse, error) {
+	// Use channels for async communication
 	resultChan := make(chan *LocationResponse, 1)
 	errorChan := make(chan error, 1)
-	stopPollingChan := make(chan struct{})
+	stopPollingChan := make(chan struct{}, 1)
 
-	// Start WebSocket RPC request
+	// Start WebSocket request
 	go func() {
-		id := wsClient.GenerateMessageID()
-		handler := wsClient.RegisterRequest(id)
-		defer wsClient.UnregisterRequest(id)
+		id := c.GenerateMessageID()
+		handler := c.RegisterRequest(id)
+		defer c.UnregisterRequest(id)
 
 		// Create the request
 		req := LocationRequest{
 			IP:        ip,
-			RequestId: requestId,
+			RequestId: id,
 		}
 		params, err := json.Marshal(req)
 		if err != nil {
@@ -276,30 +274,30 @@ func (wsClient *GpingWebSocketClient) GetLocationWithPolling(ctx context.Context
 			Params: params,
 		}
 
-		// Send the request
+		// Send the request via WebSocket
 		messageBytes, err := json.Marshal(message)
 		if err != nil {
 			errorChan <- fmt.Errorf("error marshaling message: %w", err)
 			return
 		}
 
-		log.Printf("Sending WebSocket request: %s", messageBytes)
-		if err := wsClient.Conn.WriteMessage(websocket.TextMessage, messageBytes); err != nil {
+		log.Printf("Sending location request via WebSocket: %s", messageBytes)
+		if err := c.Conn.WriteMessage(websocket.TextMessage, messageBytes); err != nil {
 			errorChan <- fmt.Errorf("error sending message: %w", err)
 			return
 		}
 
-		// Wait for the response
+		// Wait for the response from WebSocket
 		select {
 		case result := <-handler.Resp:
-			// If we get a response directly from WebSocket, parse it
 			var response LocationResponse
 			if err := json.Unmarshal(result, &response); err != nil {
-				errorChan <- fmt.Errorf("error unmarshaling location response: %w", err)
+				errorChan <- fmt.Errorf("error unmarshaling response: %w", err)
 				return
 			}
 
 			// We got a response through WebSocket, no need to poll anymore
+			log.Printf("✅ Received response via WebSocket, stopping HTTP polling")
 			close(stopPollingChan)
 			resultChan <- &response
 
@@ -319,25 +317,34 @@ func (wsClient *GpingWebSocketClient) GetLocationWithPolling(ctx context.Context
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 
+		// Only send result once flag
+		resultSent := false
+
 		for {
 			select {
 			case <-stopPollingChan:
-				// Stop polling if we got a direct response from WebSocket
+				// Stop polling if we got a direct response from WebSocket or were signaled to stop
+				log.Printf("👋 Stopping HTTP polling as requested")
 				return
 
 			case <-ticker.C:
+				// Check if we already sent a result
+				if resultSent {
+					break
+				}
+
 				// Poll the /polling endpoint to get the latest requested IP
 				pollingResp, err := httpClient.Poll(ctx)
 				if err != nil {
-					log.Printf("Error polling: %v", err)
+					log.Printf("❌ Error polling: %v", err)
 					continue
 				} else {
-					log.Printf("Polling response: %s", pollingResp)
+					log.Printf("📊 Polling response: IP=%s", pollingResp.IP)
 				}
 
 				// Check if the IP matches our requested IP
 				if pollingResp.IP == ip {
-					log.Printf("Found matching IP in polling: %s", ip)
+					log.Printf("🎯 Found matching IP in polling: %s", ip)
 
 					// Send the result to the REST API
 					err = httpClient.SendResult(ctx, TpingResultRequest{
@@ -349,16 +356,22 @@ func (wsClient *GpingWebSocketClient) GetLocationWithPolling(ctx context.Context
 					})
 
 					if err != nil {
-						log.Printf("Error sending result: %v", err)
+						log.Printf("❌ Error sending result: %v", err)
 					} else {
-						log.Printf("Successfully sent result for IP: %s", ip)
-						return
+						log.Printf("✅ Successfully sent result for IP: %s", ip)
+						resultSent = true
+
+						// No need to exit the polling loop - continue polling but don't send results
+						// The server might still be processing and we want to detect when it has an answer
 					}
+				} else if pollingResp.IP == "" {
+					log.Printf("⏳ No IP in polling response, waiting...")
 				} else {
-					log.Printf("No matching IP in polling: %s", ip)
+					log.Printf("⚠️ IP mismatch in polling: got '%s', expecting '%s'", pollingResp.IP, ip)
 				}
 
 			case <-ctx.Done():
+				log.Printf("👋 Context cancelled, stopping HTTP polling")
 				return
 			}
 		}
@@ -367,10 +380,13 @@ func (wsClient *GpingWebSocketClient) GetLocationWithPolling(ctx context.Context
 	// Wait for result or error
 	select {
 	case response := <-resultChan:
+		log.Printf("✅ Returning final location result for IP: %s", ip)
 		return response, nil
 	case err := <-errorChan:
+		log.Printf("❌ Returning error for IP %s: %v", ip, err)
 		return nil, err
 	case <-ctx.Done():
+		log.Printf("👋 Context done, returning error")
 		return nil, ctx.Err()
 	}
 }

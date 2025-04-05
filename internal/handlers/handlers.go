@@ -176,7 +176,7 @@ func (h *Handler) handleGetLocation(w http.ResponseWriter, r *http.Request) {
 	// Check if we already have an answer for this IP
 	if location, exists := models.GetAnswer(req.IP); exists {
 		// 요청에서 받은 RequestId를 응답에 포함
-		h.sendLocationResponseWithRequestId(w, location, req.RequestId)
+		h.sendLocationResponseWithRequestId(w, fmt.Sprintf("%s,%s", location.Latitude, location.Longitude), req.RequestId)
 		return
 	}
 
@@ -250,30 +250,22 @@ func (h *Handler) handleGetLocationRPC(conn *websocket.Conn, message models.RPCM
 
 	// Check if we already have an answer for this IP
 	if location, exists := models.GetAnswer(req.IP); exists {
-		// 위치 정보를 위도/경도로 분할
-		// 실제 구현에서는 더 정확한 방법으로 분할해야 함
-		parts := strings.Split(location, ",")
-		var latitude, longitude string
+		// Location 구조체의 필드 직접 사용
+		latitude := location.Latitude
+		longitude := location.Longitude
 
-		if len(parts) >= 2 {
-			latitude = strings.TrimSpace(parts[0])
-			longitude = strings.TrimSpace(parts[1])
-		} else {
-			// 위치 정보가 예상 형식이 아닌 경우에 대한 처리
-			latitude = location
-			longitude = location
-		}
-
-		// Create the result with the updated structure
-		result := models.LocationResponse{
+		// Create the response
+		resp := models.LocationResponse{
 			Latitude:  latitude,
 			Longitude: longitude,
-			SPAddress: h.config.Key.Address, // 기존 Vault 주소를 SPAddress로 사용
-			RequestId: req.RequestId,        // 요청에서 받은 RequestId 그대로 사용
+			SPAddress: h.vaultAddress,
+			RequestId: req.RequestId,
 		}
-		resultBytes, _ := json.Marshal(result)
-		response.Result = resultBytes
+
+		respBytes, _ := json.Marshal(resp)
+		response.Result = respBytes
 		conn.WriteJSON(response)
+		log.Printf("Responded with cached location for IP: %s = %s", req.IP, fmt.Sprintf("%s,%s", latitude, longitude))
 		return
 	}
 
@@ -288,32 +280,42 @@ func (h *Handler) handleGetLocationRPC(conn *websocket.Conn, message models.RPCM
 		return
 	}
 
-	// Send immediate response that processing has started
-	// processingResult := map[string]interface{}{
-	// 	"status":     "processing",
-	// 	"message":    "Location request is being processed",
-	// 	"request_id": req.RequestId, // 요청에서 받은 RequestId 포함
-	// }
-	// resultBytes, _ := json.Marshal(processingResult)
-	// response.Result = resultBytes
-	// conn.WriteJSON(response)
-
 	// Process in the background with the new logic
 	go func() {
-		h.newProcessLocationRequest(req.IP, req.RequestId)
+		if isSuccess, loc, err := h.newProcessLocationRequest(req.IP, req.RequestId); err != nil {
+			log.Printf("Error processing location request: %v", err)
+		} else if isSuccess && loc != nil {
+			// Create the response
+			resp := models.LocationResponse{
+				Latitude:  loc.Latitude,
+				Longitude: loc.Longitude,
+				SPAddress: h.config.Key.Address,
+				RequestId: req.RequestId,
+			}
+
+			respBytes, _ := json.Marshal(resp)
+			response.Result = respBytes
+			conn.WriteJSON(response)
+		}
 	}()
 }
 
 // NewProcessLocationRequest processes a location request with the updated logic
-func (h *Handler) newProcessLocationRequest(ip, requestId string) {
+func (h *Handler) newProcessLocationRequest(ip, requestId string) (bool, *models.Location, error) {
 	defer models.UnmarkIPAsProcessing(ip)
 
 	log.Printf("Processing location request for IP: %s", ip)
 
+	// Check if we already have an answer for this IP (could have been set by another thread)
+	if location, exists := models.GetAnswer(ip); exists {
+		log.Printf("Answer for IP: %s already exists (%s,%s), skipping processing", ip, location.Latitude, location.Longitude)
+		return true, &location, nil
+	}
+
 	// If we are not a proposal node, we need to wait for the proposal node to provide an answer
 	if !h.config.Server.IsProposal {
 		log.Printf("Non-proposal node waiting for answer from proposal node for IP: %s", ip)
-		return
+		return false, nil, nil
 	}
 
 	// Get the number of Tpings we need to wait for (at least 1/10 of total Tpings)
@@ -340,20 +342,22 @@ func (h *Handler) newProcessLocationRequest(ip, requestId string) {
 	bestAnswer, found := models.GetBestTpingAnswer(ip)
 	if !found {
 		log.Printf("No Tping answers found for IP: %s even though we counted some", ip)
-		return
+		return false, nil, nil
 	}
 
 	// Format the answer as a string for backward compatibility
 	location := fmt.Sprintf("%f,%f", bestAnswer.Latitude, bestAnswer.Longitude)
 
 	// Store the answer in the old format for backward compatibility
-	models.StoreAnswer(ip, location)
+	latStr := fmt.Sprintf("%f", bestAnswer.Latitude)
+	lonStr := fmt.Sprintf("%f", bestAnswer.Longitude)
+	models.StoreAnswer(ip, latStr, lonStr)
 
 	// Broadcast the answer to other Gping nodes
 	success, err := h.p2pNetwork.BroadcastAnswer(ip, location)
 	if err != nil {
 		log.Printf("Error broadcasting answer: %v", err)
-		return
+		return false, nil, err
 	}
 
 	// Log the result
@@ -362,6 +366,14 @@ func (h *Handler) newProcessLocationRequest(ip, requestId string) {
 	} else {
 		log.Printf("Failed to reach consensus for IP: %s", ip)
 	}
+
+	// 저장된 Location 정보 반환
+	storedLoc := models.Location{
+		Latitude:  latStr,
+		Longitude: lonStr,
+	}
+
+	return success, &storedLoc, nil
 }
 
 // HandleGuessLocationRPC handles the guess_location RPC method
@@ -414,8 +426,17 @@ func (h *Handler) ProcessLocationRequest(ip string) {
 	// Get the location from the P2P network
 	location, tpingAddresses := h.determineBestLocation(ip)
 
+	// Parse location to get latitude and longitude
+	parts := strings.Split(location, ",")
+	latitude := location
+	longitude := location
+	if len(parts) >= 2 {
+		latitude = strings.TrimSpace(parts[0])
+		longitude = strings.TrimSpace(parts[1])
+	}
+
 	// Store the answer
-	models.StoreAnswer(ip, location)
+	models.StoreAnswer(ip, latitude, longitude)
 
 	log.Printf("Location for IP %s: %s (from %d Tpings)", ip, location, len(tpingAddresses))
 }
