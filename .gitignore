@@ -1,0 +1,8 @@
+*.toml
+*.bin
+*.json
+*.log
+*.txt
+*.yaml
+*.yml
+*.md
