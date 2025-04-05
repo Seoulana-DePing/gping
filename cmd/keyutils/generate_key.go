@@ -24,7 +24,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	keyPath := filepath.Join(keyDir, "private_key.bin")
+	fileName := fmt.Sprintf("private_key_%s.bin", publicKey.String())
+	keyPath := filepath.Join(keyDir, fileName)
 	if err := os.WriteFile(keyPath, privateKey, 0600); err != nil {
 		fmt.Printf("Error writing private key: %v\n", err)
 		os.Exit(1)

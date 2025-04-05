@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/Seoulana-DePing/gping/internal/config"
 	"github.com/Seoulana-DePing/gping/internal/models"
@@ -47,7 +48,7 @@ func NewP2PNetwork(cfg *config.Config, privateKey ed25519.PrivateKey) *P2PNetwor
 func (p *P2PNetwork) Start(ctx context.Context) error {
 	// Connect to other Gping nodes
 	for _, gping := range p.config.Gpings {
-		go p.connectToGping(gping)
+		go p.connectWithRetry(ctx, gping)
 	}
 
 	// Start message handler
@@ -59,13 +60,57 @@ func (p *P2PNetwork) Start(ctx context.Context) error {
 	return nil
 }
 
+// Connect to another Gping node with retry
+func (p *P2PNetwork) connectWithRetry(ctx context.Context, gping config.GpingConfig) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if p.isConnected(gping.Address) {
+				// Check if all nodes are connected
+				p.checkAllNodesConnected()
+				return
+			}
+
+			if err := p.connectToGping(gping); err == nil {
+				log.Printf("✅   Success connection %s", gping.URL)
+				// Check if all nodes are connected
+				p.checkAllNodesConnected()
+				return
+			}
+		}
+	}
+}
+
+// Check if a Gping node is already connected
+func (p *P2PNetwork) isConnected(address string) bool {
+	p.connectionsMu.RLock()
+	defer p.connectionsMu.RUnlock()
+	_, exists := p.connections[address]
+	return exists
+}
+
+// Check if all Gping nodes are connected
+func (p *P2PNetwork) checkAllNodesConnected() {
+	p.connectionsMu.RLock()
+	defer p.connectionsMu.RUnlock()
+
+	if len(p.connections) == len(p.config.Gpings) {
+		log.Printf("🎉   All the GPings are connected.")
+	}
+}
+
 // Connect to another Gping node
-func (p *P2PNetwork) connectToGping(gping config.GpingConfig) {
+func (p *P2PNetwork) connectToGping(gping config.GpingConfig) error {
 	dialer := websocket.Dialer{}
 	conn, _, err := dialer.Dial(gping.URL, nil)
 	if err != nil {
 		log.Printf("Failed to connect to Gping node at %s: %v", gping.URL, err)
-		return
+		return err
 	}
 
 	p.connectionsMu.Lock()
@@ -73,6 +118,8 @@ func (p *P2PNetwork) connectToGping(gping config.GpingConfig) {
 	p.connectionsMu.Unlock()
 
 	go p.receiveMessages(conn, gping.Address)
+
+	return nil
 }
 
 // Receive messages from a connected Gping node
