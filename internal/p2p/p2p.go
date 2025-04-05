@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -101,6 +103,11 @@ func (p *P2PNetwork) checkAllNodesConnected() {
 
 	if len(p.connections) == len(p.config.Gpings) {
 		log.Printf("🎉   All the GPings are connected.")
+
+		// If this node is a proposal, broadcast this information
+		if p.config.Server.IsProposal {
+			go p.broadcastProposalInfo()
+		}
 	}
 }
 
@@ -129,13 +136,30 @@ func (p *P2PNetwork) receiveMessages(conn *websocket.Conn, address string) {
 		p.connectionsMu.Lock()
 		delete(p.connections, address)
 		p.connectionsMu.Unlock()
+		log.Printf("❌ Connection closed with node: %s", address)
 	}()
+
+	log.Printf("🔄 Started receiving messages from node: %s", address)
 
 	for {
 		var message models.SignedMessage
 		if err := conn.ReadJSON(&message); err != nil {
 			log.Printf("Error reading message from %s: %v", address, err)
 			return
+		}
+
+		log.Printf("📥 Received message from %s", address)
+
+		// Try to understand what type of message it is for better logging
+		var locationAnswer [2]string
+		var proposalInfo models.ProposalInfo
+
+		if json.Unmarshal(message.Message, &locationAnswer) == nil {
+			log.Printf("📌 Received location answer for IP: %s", locationAnswer[0])
+		} else if json.Unmarshal(message.Message, &proposalInfo) == nil {
+			log.Printf("📌 Received proposal info from: %s", proposalInfo.URL)
+		} else {
+			log.Printf("📌 Received signature or other message type")
 		}
 
 		// Validate the signature
@@ -170,15 +194,24 @@ func (p *P2PNetwork) handleMessages(ctx context.Context) {
 
 // ProcessMessage processes an incoming message
 func (p *P2PNetwork) processMessage(message models.SignedMessage) {
-	// Check if this is a location answer broadcast or a signature response
+	// First try to unmarshal as a location answer
 	var locationAnswer [2]string
 	if err := json.Unmarshal(message.Message, &locationAnswer); err == nil {
 		// This is a location answer broadcast
 		p.handleLocationAnswerBroadcast(message, locationAnswer)
-	} else {
-		// This might be a signature response to our broadcast
-		p.handleSignatureResponse(message)
+		return
 	}
+
+	// Try to unmarshal as a proposal info
+	var proposalInfo models.ProposalInfo
+	if err := json.Unmarshal(message.Message, &proposalInfo); err == nil {
+		// This is a proposal info broadcast
+		p.handleProposalInfoBroadcast(proposalInfo)
+		return
+	}
+
+	// This might be a signature response to our broadcast
+	p.handleSignatureResponse(message)
 }
 
 // HandleLocationAnswerBroadcast handles a broadcast of a location answer
@@ -186,7 +219,21 @@ func (p *P2PNetwork) handleLocationAnswerBroadcast(message models.SignedMessage,
 	ip := locationAnswer[0]
 	location := locationAnswer[1]
 
-	// Check if we have a matching answer
+	// If tpings array is empty, we automatically agree with any answer
+	if len(p.config.Tpings.Addresses) == 0 {
+		// We agree with this answer, sign the message and send back
+		signature := p.signMessage(message.Message)
+		response := models.SignedMessage{
+			Message:   message.Message,
+			Signature: signature,
+		}
+
+		// Send the response to all nodes
+		p.broadcastChan <- response
+		return
+	}
+
+	// Otherwise, check if we have a matching answer
 	storedLocation, exists := models.GetAnswer(ip)
 	if exists && storedLocation == location {
 		// We agree with this answer, sign the message and send back
@@ -320,4 +367,89 @@ func SendTpingData(url string, data models.TpingData) error {
 	}
 
 	return nil
+}
+
+// BroadcastProposalInfo broadcasts this node's proposal information
+func (p *P2PNetwork) broadcastProposalInfo() {
+	// Create a proposal info message
+	proposalInfo := models.ProposalInfo{
+		URL:     fmt.Sprintf("ws://%s:%d/ws", getHostname(), p.config.Server.Port),
+		Address: p.config.Key.Address,
+	}
+
+	// Log broadcast attempt
+	log.Printf("🔄 Broadcasting proposal info to %d nodes", len(p.connections))
+
+	// Marshal the proposal info
+	proposalBytes, err := json.Marshal(proposalInfo)
+	if err != nil {
+		log.Printf("Error marshaling proposal info: %v", err)
+		return
+	}
+
+	// Sign the message
+	signature := p.signMessage(proposalBytes)
+
+	// Create the signed message
+	signedMessage := models.SignedMessage{
+		Message:   proposalBytes,
+		Signature: signature,
+	}
+
+	// Broadcast message directly to all connected nodes
+	p.connectionsMu.RLock()
+	for address, conn := range p.connections {
+		go func(addr string, c *websocket.Conn) {
+			log.Printf("📤 Sending proposal info to node: %s", addr)
+			if err := c.WriteJSON(signedMessage); err != nil {
+				log.Printf("❌ Error sending proposal info to %s: %v", addr, err)
+			} else {
+				log.Printf("✅ Successfully sent proposal info to %s", addr)
+			}
+		}(address, conn)
+	}
+	p.connectionsMu.RUnlock()
+
+	// Also use the broadcast channel for our internal processing
+	p.broadcastChan <- signedMessage
+
+	// Log the proposal information
+	log.Printf("⭐ The proposal of this Gping Network is %s", proposalInfo.URL)
+}
+
+// Get hostname for the proposal URL
+func getHostname() string {
+	// Try to get the hostname from environment variable if available
+	if host := os.Getenv("GPING_HOST"); host != "" {
+		return host
+	}
+
+	// Try to determine the machine's IP address
+	// This is a simplified approach - in production you'd want more robust IP detection
+	addrs, err := net.InterfaceAddrs()
+	if err == nil {
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				if ipnet.IP.To4() != nil {
+					return ipnet.IP.String()
+				}
+			}
+		}
+	}
+
+	// Fallback to localhost if can't determine
+	return "localhost"
+}
+
+// HandleProposalInfoBroadcast handles a broadcast of proposal information
+func (p *P2PNetwork) handleProposalInfoBroadcast(proposalInfo models.ProposalInfo) {
+	// Store the proposal information for future reference
+	// In a real implementation, this might update a registry of proposals
+
+	// Log the proposal information
+	log.Printf("⭐ The proposal of this Gping Network is %s (address: %s)",
+		proposalInfo.URL, proposalInfo.Address)
+
+	// For debugging, also log our own address to verify nodes are properly identified
+	log.Printf("📊 My node address: %s", p.config.Key.Address)
 }

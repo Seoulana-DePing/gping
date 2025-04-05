@@ -36,6 +36,27 @@ type GpingNode struct {
 	Address string // Solana address of the Gping node
 }
 
+// ProposalInfo represents the proposal information for the P2P network
+type ProposalInfo struct {
+	URL     string `json:"url"`
+	Address string `json:"address"`
+}
+
+// RPCMessage represents a WebSocket RPC message
+type RPCMessage struct {
+	ID     string          `json:"id"`               // Message ID for request/response matching
+	Method string          `json:"method"`           // RPC method name
+	Params json.RawMessage `json:"params,omitempty"` // Parameters for the method
+	Result json.RawMessage `json:"result,omitempty"` // Result of the method call
+	Error  *RPCError       `json:"error,omitempty"`  // Error information if any
+}
+
+// RPCError represents an error in a WebSocket RPC message
+type RPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
 // Global variables for storing location data and Tping withdrawal information
 var (
 	// Answers maps IP addresses to their determined locations

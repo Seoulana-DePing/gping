@@ -55,6 +55,16 @@ func main() {
 	}()
 
 	log.Printf("Gping server started on port %d", cfg.Server.Port)
+	log.Printf(`
+  ____        ____  _             
+ / ___|      |  _ \(_)_ __   __ _ 
+ | |  _ _____| |_) | | '_ \ / _` + "`" + ` |
+ | |_| |_____|  __/| | | | | (_| |
+  \____|     |_|   |_|_| |_|\____|
+                             |___/ 
+	`)
+
+	log.Printf("🟣  Solana address: %s", cfg.Key.Address)
 
 	// Wait for termination signal
 	waitForTermination(cancel)

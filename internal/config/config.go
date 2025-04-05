@@ -9,18 +9,19 @@ import (
 
 // Config represents the overall configuration structure
 type Config struct {
-	Server ServerConfig `toml:"server"`
-	Key    KeyConfig    `toml:"key"`
-	Vault  VaultConfig  `toml:"vault"`
+	Server ServerConfig  `toml:"server"`
+	Key    KeyConfig     `toml:"key"`
+	Vault  VaultConfig   `toml:"vault"`
 	Gpings []GpingConfig `toml:"gpings"`
-	Tpings TpingConfig  `toml:"tpings"`
+	Tpings TpingConfig   `toml:"tpings"`
 }
 
 // ServerConfig contains server-related configuration
 type ServerConfig struct {
-	Port      int    `toml:"port"`
-	Router    string `toml:"router"`
-	SolanaRpc string `toml:"solana_rpc"`
+	Port       int    `toml:"port"`
+	Router     string `toml:"router"`
+	SolanaRpc  string `toml:"solana_rpc"`
+	IsProposal bool   `toml:"is_proposal"`
 }
 
 // KeyConfig contains key-related configuration
@@ -101,4 +102,4 @@ func validateConfig(config *Config) error {
 	}
 
 	return nil
-} 
+}

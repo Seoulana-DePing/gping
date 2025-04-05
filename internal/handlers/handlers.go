@@ -38,8 +38,9 @@ func NewHandler(cfg *config.Config, p2pNetwork *p2p.P2PNetwork) *Handler {
 func (h *Handler) SetupRoutes(mux *http.ServeMux) {
 	// WebSocket endpoint for P2P communication
 	mux.HandleFunc("/ws", h.handleWebSocket)
+	mux.HandleFunc("/ws/p2p", h.handleWebSocket)
 
-	// RPC endpoints
+	// RPC endpoints (kept for backward compatibility)
 	mux.HandleFunc("/get_location", h.handleGetLocation)
 	mux.HandleFunc("/guess_location", h.handleGuessLocation)
 }
@@ -57,23 +58,74 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Error upgrading connection to WebSocket: %v", err)
 		return
 	}
-
-	// Handle the WebSocket connection
-	// This would be managed by the P2P network
-	// For simplicity, we'll just close it after a while
 	defer conn.Close()
 
-	// Keep the connection alive until the client disconnects
+	// Check request origin
+	origin := r.Header.Get("Origin")
+
+	// If this is a P2P connection from another Gping, handle it differently
+	// For simplicity, we'll use the URL path to determine the connection type
+	if r.URL.Path == "/ws/p2p" {
+		log.Printf("P2P connection established from: %s", origin)
+		h.handleP2PConnection(conn)
+		return
+	}
+
+	// Otherwise, this is a client connection for RPC
+	log.Printf("RPC client connection established from: %s", origin)
+	h.handleRPCConnection(conn)
+}
+
+// HandleP2PConnection handles a WebSocket connection for P2P communication
+func (h *Handler) handleP2PConnection(conn *websocket.Conn) {
+	// This would be handled by the P2P network
 	for {
 		_, _, err := conn.ReadMessage()
 		if err != nil {
-			log.Printf("Error reading from WebSocket: %v", err)
+			log.Printf("Error reading from P2P WebSocket: %v", err)
 			break
 		}
 	}
 }
 
-// HandleGetLocation handles the get_location RPC method
+// HandleRPCConnection handles a WebSocket connection for RPC communication
+func (h *Handler) handleRPCConnection(conn *websocket.Conn) {
+	for {
+		// Read the RPC message
+		var message models.RPCMessage
+		if err := conn.ReadJSON(&message); err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("WebSocket error: %v", err)
+			}
+			break
+		}
+
+		// Process the RPC method
+		go h.processRPCMessage(conn, message)
+	}
+}
+
+// ProcessRPCMessage processes an RPC message and sends the response
+func (h *Handler) processRPCMessage(conn *websocket.Conn, message models.RPCMessage) {
+	response := models.RPCMessage{
+		ID: message.ID,
+	}
+
+	switch message.Method {
+	case "get_location":
+		h.handleGetLocationRPC(conn, message, &response)
+	case "guess_location":
+		h.handleGuessLocationRPC(conn, message, &response)
+	default:
+		response.Error = &models.RPCError{
+			Code:    -32601,
+			Message: "Method not found",
+		}
+		conn.WriteJSON(response)
+	}
+}
+
+// HandleGetLocation handles the get_location RPC method over HTTP (kept for backward compatibility)
 func (h *Handler) handleGetLocation(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -109,6 +161,136 @@ func (h *Handler) handleGetLocation(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// HandleGuessLocation handles the guess_location RPC method over HTTP (kept for backward compatibility)
+func (h *Handler) handleGuessLocation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var data models.TpingData
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	// Validate the Tping address
+	if !h.isTpingAuthorized(data.Address) {
+		http.Error(w, "Unauthorized Tping address", http.StatusUnauthorized)
+		return
+	}
+
+	// Store the data
+	h.tpingDataMu.Lock()
+	if _, exists := h.tpingData[data.GPS]; !exists {
+		h.tpingData[data.GPS] = make([]models.TpingData, 0)
+	}
+	h.tpingData[data.GPS] = append(h.tpingData[data.GPS], data)
+	h.tpingDataMu.Unlock()
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "success",
+		"message": "Data received",
+	})
+}
+
+// HandleGetLocationRPC handles the get_location RPC method
+func (h *Handler) handleGetLocationRPC(conn *websocket.Conn, message models.RPCMessage, response *models.RPCMessage) {
+	// Parse the parameters
+	var req models.LocationRequest
+	if err := json.Unmarshal(message.Params, &req); err != nil {
+		response.Error = &models.RPCError{
+			Code:    -32700,
+			Message: "Invalid request format",
+		}
+		conn.WriteJSON(response)
+		return
+	}
+
+	// Check if we already have an answer for this IP
+	if location, exists := models.GetAnswer(req.IP); exists {
+		// Create the result
+		result := models.LocationResponse{
+			Location: location,
+			Vault:    h.vaultAddress,
+		}
+		resultBytes, _ := json.Marshal(result)
+		response.Result = resultBytes
+		conn.WriteJSON(response)
+		return
+	}
+
+	// Start a new goroutine to process the location request
+	if !models.MarkIPAsProcessing(req.IP) {
+		// This IP is already being processed
+		response.Error = &models.RPCError{
+			Code:    -32000,
+			Message: "Request for this IP is already being processed",
+		}
+		conn.WriteJSON(response)
+		return
+	}
+
+	// Send immediate response that processing has started
+	processingResult := map[string]string{
+		"status":  "processing",
+		"message": "Location request is being processed",
+	}
+	resultBytes, _ := json.Marshal(processingResult)
+	response.Result = resultBytes
+	conn.WriteJSON(response)
+
+	// Process in the background
+	go func() {
+		h.processLocationRequest(req.IP)
+
+		// After processing is complete, we could notify the client if we had a mechanism
+		// For now, the client would need to poll using another get_location call
+	}()
+}
+
+// HandleGuessLocationRPC handles the guess_location RPC method
+func (h *Handler) handleGuessLocationRPC(conn *websocket.Conn, message models.RPCMessage, response *models.RPCMessage) {
+	// Parse the parameters
+	var data models.TpingData
+	if err := json.Unmarshal(message.Params, &data); err != nil {
+		response.Error = &models.RPCError{
+			Code:    -32700,
+			Message: "Invalid request format",
+		}
+		conn.WriteJSON(response)
+		return
+	}
+
+	// Validate the Tping address
+	if !h.isTpingAuthorized(data.Address) {
+		response.Error = &models.RPCError{
+			Code:    -32000,
+			Message: "Unauthorized Tping address",
+		}
+		conn.WriteJSON(response)
+		return
+	}
+
+	// Store the data
+	h.tpingDataMu.Lock()
+	if _, exists := h.tpingData[data.GPS]; !exists {
+		h.tpingData[data.GPS] = make([]models.TpingData, 0)
+	}
+	h.tpingData[data.GPS] = append(h.tpingData[data.GPS], data)
+	h.tpingDataMu.Unlock()
+
+	// Send success response
+	successResult := map[string]string{
+		"status":  "success",
+		"message": "Data received",
+	}
+	resultBytes, _ := json.Marshal(successResult)
+	response.Result = resultBytes
+	conn.WriteJSON(response)
+}
+
 // ProcessLocationRequest processes a location request in a separate goroutine
 func (h *Handler) processLocationRequest(ip string) {
 	defer models.UnmarkIPAsProcessing(ip)
@@ -134,19 +316,23 @@ func (h *Handler) processLocationRequest(ip string) {
 	// Store Tping addresses for withdrawal
 	models.StoreTpingData(ip, tpingAddresses)
 
-	// Broadcast the answer to the P2P network
-	success, err := h.p2pNetwork.BroadcastAnswer(ip, location)
-	if err != nil {
-		log.Printf("Error broadcasting answer: %v", err)
-		return
-	}
+	// Broadcast the answer to the P2P network only if is_proposal is true
+	if h.config.Server.IsProposal {
+		success, err := h.p2pNetwork.BroadcastAnswer(ip, location)
+		if err != nil {
+			log.Printf("Error broadcasting answer: %v", err)
+			return
+		}
 
-	if !success {
-		log.Printf("Failed to reach consensus for IP: %s", ip)
-		return
-	}
+		if !success {
+			log.Printf("Failed to reach consensus for IP: %s", ip)
+			return
+		}
 
-	log.Printf("Successfully determined location for IP: %s = %s", ip, location)
+		log.Printf("Successfully determined location for IP: %s = %s (with consensus)", ip, location)
+	} else {
+		log.Printf("Successfully determined location for IP: %s = %s (no broadcast)", ip, location)
+	}
 }
 
 // DetermineBestLocation determines the best location based on Tping data
@@ -191,40 +377,6 @@ func (h *Handler) sendLocationResponse(w http.ResponseWriter, location string) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
-}
-
-// HandleGuessLocation handles the guess_location RPC method
-func (h *Handler) handleGuessLocation(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var data models.TpingData
-	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-		http.Error(w, "Invalid request format", http.StatusBadRequest)
-		return
-	}
-
-	// Validate the Tping address
-	if !h.isTpingAuthorized(data.Address) {
-		http.Error(w, "Unauthorized Tping address", http.StatusUnauthorized)
-		return
-	}
-
-	// Store the data
-	h.tpingDataMu.Lock()
-	if _, exists := h.tpingData[data.GPS]; !exists {
-		h.tpingData[data.GPS] = make([]models.TpingData, 0)
-	}
-	h.tpingData[data.GPS] = append(h.tpingData[data.GPS], data)
-	h.tpingDataMu.Unlock()
-
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":  "success",
-		"message": "Data received",
-	})
 }
 
 // IsTpingAuthorized checks if a Tping address is authorized
