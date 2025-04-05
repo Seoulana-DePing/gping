@@ -424,6 +424,7 @@ func (p *P2PNetwork) broadcastMessage(message models.SignedMessage) {
 
 // BroadcastAnswer broadcasts a location answer and waits for consensus
 func (p *P2PNetwork) BroadcastAnswer(ip, location string) (bool, error) {
+	// 위치 정보는 "위도,경도" 형식으로 저장되었다고 가정
 	// Create the message array [ip, location]
 	message := [2]string{ip, location}
 
@@ -458,7 +459,7 @@ func (p *P2PNetwork) BroadcastAnswer(ip, location string) (bool, error) {
 	select {
 	case result := <-resultChan:
 		return result, nil
-	case <-context.Background().Done():
+	case <-time.After(30 * time.Second): // 명시적인 타임아웃 추가
 		// Remove the pending result
 		p.pendingResultsMu.Lock()
 		delete(p.pendingResults, messageStr)

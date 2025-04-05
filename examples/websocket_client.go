@@ -31,7 +31,16 @@ type RPCError struct {
 
 // LocationRequest is the request structure for the get_location RPC method
 type LocationRequest struct {
-	IP string `json:"ip"`
+	IP        string `json:"ip"`
+	RequestId string `json:"request_id"`
+}
+
+// LocationResponse is the response structure for the get_location RPC method
+type LocationResponse struct {
+	Latitude  string `json:"latitude"`
+	Longitude string `json:"longitude"`
+	SPAddress string `json:"sp_address"` // SP contract address
+	RequestId string `json:"request_id"`
 }
 
 // TpingData represents the data sent by Tpings
@@ -147,13 +156,19 @@ func (c *GpingWebSocketClient) listenForMessages() {
 }
 
 // GetLocation gets the location for an IP address
-func (c *GpingWebSocketClient) GetLocation(ctx context.Context, ip string) (json.RawMessage, error) {
+func (c *GpingWebSocketClient) GetLocation(ctx context.Context, ip string) (*LocationResponse, error) {
 	id := c.GenerateMessageID()
 	handler := c.RegisterRequest(id)
 	defer c.UnregisterRequest(id)
 
+	// 요청 ID도 추가
+	requestId := fmt.Sprintf("req-%s", id)
+
 	// Create the request
-	req := LocationRequest{IP: ip}
+	req := LocationRequest{
+		IP:        ip,
+		RequestId: requestId,
+	}
 	params, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("error marshaling params: %w", err)
@@ -179,7 +194,12 @@ func (c *GpingWebSocketClient) GetLocation(ctx context.Context, ip string) (json
 	// Wait for the response
 	select {
 	case result := <-handler.Resp:
-		return result, nil
+		// 응답을 LocationResponse 구조체로 변환
+		var response LocationResponse
+		if err := json.Unmarshal(result, &response); err != nil {
+			return nil, fmt.Errorf("error unmarshaling location response: %w", err)
+		}
+		return &response, nil
 	case rpcErr := <-handler.Error:
 		return nil, fmt.Errorf("RPC error: %s (code: %d)", rpcErr.Message, rpcErr.Code)
 	case <-ctx.Done():
@@ -255,16 +275,20 @@ func main() {
 	}()
 
 	// Example: Get location
-	result, err := client.GetLocation(ctx, "203.0.113.42")
+	response, err := client.GetLocation(ctx, "203.0.113.42")
 	if err != nil {
 		log.Printf("Error getting location: %v", err)
 	} else {
-		log.Printf("Get location result: %s", result)
+		log.Printf("Get location result:")
+		log.Printf("  Latitude: %s", response.Latitude)
+		log.Printf("  Longitude: %s", response.Longitude)
+		log.Printf("  SP Address: %s", response.SPAddress)
+		log.Printf("  Request ID: %s", response.RequestId)
 	}
 
 	// Example: Send Tping data
 	/*
-		result, err = client.SendTpingData(ctx, "Seoul, South Korea", 150, "TpingAddress1123456789")
+		result, err = client.SendTpingData(ctx, "37.5665,126.9780", 150, "TpingAddress1123456789")
 		if err != nil {
 			log.Printf("Error sending Tping data: %v", err)
 		} else {

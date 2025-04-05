@@ -8,13 +8,16 @@ import (
 
 // LocationRequest is the request structure for the get_location RPC method
 type LocationRequest struct {
-	IP string `json:"ip"`
+	IP        string `json:"ip"`
+	RequestId string `json:"request_id"`
 }
 
 // LocationResponse is the response structure for the get_location RPC method
 type LocationResponse struct {
-	Location string `json:"location"`
-	Vault    string `json:"vault"` // Vault contract address
+	Latitude  string `json:"latitude"`
+	Longitude string `json:"longitude"`
+	SPAddress string `json:"sp_address"` // SP contract address
+	RequestId string `json:"request_id"`
 }
 
 // TpingData represents the data sent by Tpings

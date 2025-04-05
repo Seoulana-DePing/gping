@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/Seoulana-DePing/gping/internal/config"
@@ -171,7 +172,8 @@ func (h *Handler) handleGetLocation(w http.ResponseWriter, r *http.Request) {
 
 	// Check if we already have an answer for this IP
 	if location, exists := models.GetAnswer(req.IP); exists {
-		h.sendLocationResponse(w, location)
+		// 요청에서 받은 RequestId를 응답에 포함
+		h.sendLocationResponseWithRequestId(w, location, req.RequestId)
 		return
 	}
 
@@ -182,13 +184,14 @@ func (h *Handler) handleGetLocation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go h.processLocationRequest(req.IP)
+	go h.ProcessLocationRequest(req.IP)
 
 	// Respond immediately to the client
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":  "processing",
-		"message": "Location request is being processed",
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":     "processing",
+		"message":    "Location request is being processed",
+		"request_id": req.RequestId, // 요청에서 받은 RequestId 포함
 	})
 }
 
@@ -206,7 +209,7 @@ func (h *Handler) handleGuessLocation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate the Tping address
-	if !h.isTpingAuthorized(data.Address) {
+	if !h.IsTpingAuthorized(data.Address) {
 		http.Error(w, "Unauthorized Tping address", http.StatusUnauthorized)
 		return
 	}
@@ -241,10 +244,26 @@ func (h *Handler) handleGetLocationRPC(conn *websocket.Conn, message models.RPCM
 
 	// Check if we already have an answer for this IP
 	if location, exists := models.GetAnswer(req.IP); exists {
-		// Create the result
+		// 위치 정보를 위도/경도로 분할
+		// 실제 구현에서는 더 정확한 방법으로 분할해야 함
+		parts := strings.Split(location, ",")
+		var latitude, longitude string
+
+		if len(parts) >= 2 {
+			latitude = strings.TrimSpace(parts[0])
+			longitude = strings.TrimSpace(parts[1])
+		} else {
+			// 위치 정보가 예상 형식이 아닌 경우에 대한 처리
+			latitude = location
+			longitude = location
+		}
+
+		// Create the result with the updated structure
 		result := models.LocationResponse{
-			Location: location,
-			Vault:    h.vaultAddress,
+			Latitude:  latitude,
+			Longitude: longitude,
+			SPAddress: h.vaultAddress, // 기존 Vault 주소를 SPAddress로 사용
+			RequestId: req.RequestId,  // 요청에서 받은 RequestId 그대로 사용
 		}
 		resultBytes, _ := json.Marshal(result)
 		response.Result = resultBytes
@@ -264,9 +283,10 @@ func (h *Handler) handleGetLocationRPC(conn *websocket.Conn, message models.RPCM
 	}
 
 	// Send immediate response that processing has started
-	processingResult := map[string]string{
-		"status":  "processing",
-		"message": "Location request is being processed",
+	processingResult := map[string]interface{}{
+		"status":     "processing",
+		"message":    "Location request is being processed",
+		"request_id": req.RequestId, // 요청에서 받은 RequestId 포함
 	}
 	resultBytes, _ := json.Marshal(processingResult)
 	response.Result = resultBytes
@@ -274,8 +294,7 @@ func (h *Handler) handleGetLocationRPC(conn *websocket.Conn, message models.RPCM
 
 	// Process in the background
 	go func() {
-		h.processLocationRequest(req.IP)
-
+		h.ProcessLocationRequest(req.IP)
 		// After processing is complete, we could notify the client if we had a mechanism
 		// For now, the client would need to poll using another get_location call
 	}()
@@ -295,7 +314,7 @@ func (h *Handler) handleGuessLocationRPC(conn *websocket.Conn, message models.RP
 	}
 
 	// Validate the Tping address
-	if !h.isTpingAuthorized(data.Address) {
+	if !h.IsTpingAuthorized(data.Address) {
 		response.Error = &models.RPCError{
 			Code:    -32000,
 			Message: "Unauthorized Tping address",
@@ -322,48 +341,19 @@ func (h *Handler) handleGuessLocationRPC(conn *websocket.Conn, message models.RP
 	conn.WriteJSON(response)
 }
 
-// ProcessLocationRequest processes a location request in a separate goroutine
-func (h *Handler) processLocationRequest(ip string) {
+// ProcessLocationRequest processes a location request
+func (h *Handler) ProcessLocationRequest(ip string) {
 	defer models.UnmarkIPAsProcessing(ip)
 
-	// This would involve waiting for Tping data, then processing it
-	// For now, we'll implement a simple version that just polls the data periodically
+	log.Printf("Processing location request for IP: %s", ip)
 
-	// Wait for enough Tping data
-	// In a real implementation, this would involve some kind of waiting mechanism
-	// For simplicity, we'll just check if we have any data
-
-	// After receiving enough data, determine the best location
+	// Get the location from the P2P network
 	location, tpingAddresses := h.determineBestLocation(ip)
 
-	if location == "" {
-		log.Printf("Failed to determine location for IP: %s", ip)
-		return
-	}
-
-	// Store the location
+	// Store the answer
 	models.StoreAnswer(ip, location)
 
-	// Store Tping addresses for withdrawal
-	models.StoreTpingData(ip, tpingAddresses)
-
-	// Broadcast the answer to the P2P network only if is_proposal is true
-	if h.config.Server.IsProposal {
-		success, err := h.p2pNetwork.BroadcastAnswer(ip, location)
-		if err != nil {
-			log.Printf("Error broadcasting answer: %v", err)
-			return
-		}
-
-		if !success {
-			log.Printf("Failed to reach consensus for IP: %s", ip)
-			return
-		}
-
-		log.Printf("Successfully determined location for IP: %s = %s (with consensus)", ip, location)
-	} else {
-		log.Printf("Successfully determined location for IP: %s = %s (no broadcast)", ip, location)
-	}
+	log.Printf("Location for IP %s: %s (from %d Tpings)", ip, location, len(tpingAddresses))
 }
 
 // DetermineBestLocation determines the best location based on Tping data
@@ -371,53 +361,87 @@ func (h *Handler) determineBestLocation(ip string) (string, []string) {
 	h.tpingDataMu.RLock()
 	defer h.tpingDataMu.RUnlock()
 
-	data, exists := h.tpingData[ip]
-	if !exists || len(data) == 0 {
+	// Tping data에서 GPS 정보를 얻는 부분
+	tpings, exists := h.tpingData[ip]
+	if !exists || len(tpings) == 0 {
 		return "", nil
 	}
 
 	// Sort the data by response time
-	sort.Slice(data, func(i, j int) bool {
-		return data[i].Time < data[j].Time
+	sort.Slice(tpings, func(i, j int) bool {
+		return tpings[i].Time < tpings[j].Time
 	})
 
 	// Take only the top 10% of data (or at least 1)
-	count := max(1, len(data)/10)
-	if count > len(data) {
-		count = len(data)
+	count := max(1, len(tpings)/10)
+	if count > len(tpings) {
+		count = len(tpings)
 	}
 
 	// Get the location with the lowest response time
-	bestLocation := data[0].GPS
+	// GPS 데이터가 "위도,경도" 형식이라고 가정
+	bestLocation := tpings[0].GPS
 
 	// Collect Tping addresses
 	tpingAddresses := make([]string, 0, count)
 	for i := 0; i < count; i++ {
-		tpingAddresses = append(tpingAddresses, data[i].Address)
+		tpingAddresses = append(tpingAddresses, tpings[i].Address)
 	}
 
 	return bestLocation, tpingAddresses
 }
 
-// SendLocationResponse sends a location response
-func (h *Handler) sendLocationResponse(w http.ResponseWriter, location string) {
+// SendLocationResponseWithRequestId sends a location response with the specified RequestId
+func (h *Handler) sendLocationResponseWithRequestId(w http.ResponseWriter, location string, requestId string) {
+	// 위치 정보를 위도/경도로 분할
+	parts := strings.Split(location, ",")
+	var latitude, longitude string
+
+	if len(parts) >= 2 {
+		latitude = strings.TrimSpace(parts[0])
+		longitude = strings.TrimSpace(parts[1])
+	} else {
+		// 위치 정보가 예상 형식이 아닌 경우에 대한 처리
+		latitude = location
+		longitude = location
+	}
+
 	resp := models.LocationResponse{
-		Location: location,
-		Vault:    h.vaultAddress,
+		Latitude:  latitude,
+		Longitude: longitude,
+		SPAddress: h.vaultAddress, // 기존 Vault 주소를 SPAddress로 사용
+		RequestId: requestId,      // 전달받은 RequestId 사용
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
 
+// SendLocationResponse sends a location response (legacy version for backward compatibility)
+func (h *Handler) sendLocationResponse(w http.ResponseWriter, location string) {
+	// 기존 호환성을 위해 빈 RequestId로 호출
+	h.sendLocationResponseWithRequestId(w, location, "")
+}
+
 // IsTpingAuthorized checks if a Tping address is authorized
-func (h *Handler) isTpingAuthorized(address string) bool {
+func (h *Handler) IsTpingAuthorized(address string) bool {
 	for _, addr := range h.config.Tpings.Addresses {
 		if addr == address {
 			return true
 		}
 	}
 	return false
+}
+
+// StoreTpingData stores Tping data
+func (h *Handler) StoreTpingData(data models.TpingData) {
+	h.tpingDataMu.Lock()
+	defer h.tpingDataMu.Unlock()
+
+	if _, exists := h.tpingData[data.GPS]; !exists {
+		h.tpingData[data.GPS] = make([]models.TpingData, 0)
+	}
+	h.tpingData[data.GPS] = append(h.tpingData[data.GPS], data)
 }
 
 // StartServer starts the HTTP server

@@ -44,17 +44,27 @@ func main() {
 		log.Fatalf("Error starting P2P network: %v", err)
 	}
 
-	// Create and start handler
-	handler := handlers.NewHandler(cfg, p2pNetwork)
+	// Create WebSocket handler
+	wsHandler := handlers.NewHandler(cfg, p2pNetwork)
 
-	// Start the HTTP server
+	// Start the WebSocket server
 	go func() {
-		if err := handler.StartServer(ctx); err != nil {
-			log.Fatalf("Error starting server: %v", err)
+		if err := wsHandler.StartServer(ctx); err != nil {
+			log.Fatalf("Error starting WebSocket server: %v", err)
 		}
 	}()
 
-	log.Printf("Gping server started on port %d", cfg.Server.Port)
+	// Create and start REST API handler
+	restHandler := handlers.NewRESTHandler(cfg, wsHandler)
+
+	go func() {
+		if err := restHandler.StartServer(ctx); err != nil {
+			log.Fatalf("Error starting REST API server: %v", err)
+		}
+	}()
+
+	log.Printf("Gping WebSocket server started on port %d", cfg.Server.Port)
+	log.Printf("Gping REST API server started on port %d", cfg.Server.Port+1)
 	log.Printf(`
   ____        ____  _             
  / ___|      |  _ \(_)_ __   __ _ 
