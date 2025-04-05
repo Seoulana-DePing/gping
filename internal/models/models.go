@@ -38,11 +38,8 @@ type GpingNode struct {
 
 // ProposalInfo represents the proposal information for the P2P network
 type ProposalInfo struct {
-	URL        string `json:"url"`
-	Address    string `json:"address"`
-	IsProposal bool   `json:"is_proposal"`
-	Message    string `json:"message"`
-	Timestamp  int64  `json:"timestamp"`
+	Address    string `json:"address"`     // Solana address of the proposal node
+	IsProposal bool   `json:"is_proposal"` // Flag to identify this is a proposal message
 }
 
 // RPCMessage represents a WebSocket RPC message
