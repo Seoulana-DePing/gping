@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Seoulana-DePing/gping/internal/config"
 	"github.com/Seoulana-DePing/gping/internal/models"
@@ -242,6 +245,9 @@ func (h *Handler) handleGetLocationRPC(conn *websocket.Conn, message models.RPCM
 		return
 	}
 
+	// Add the IP to the requested IPs global variable for polling
+	models.AddRequestedIP(req.IP)
+
 	// Check if we already have an answer for this IP
 	if location, exists := models.GetAnswer(req.IP); exists {
 		// 위치 정보를 위도/경도로 분할
@@ -262,8 +268,8 @@ func (h *Handler) handleGetLocationRPC(conn *websocket.Conn, message models.RPCM
 		result := models.LocationResponse{
 			Latitude:  latitude,
 			Longitude: longitude,
-			SPAddress: h.vaultAddress, // 기존 Vault 주소를 SPAddress로 사용
-			RequestId: req.RequestId,  // 요청에서 받은 RequestId 그대로 사용
+			SPAddress: h.config.Key.Address, // 기존 Vault 주소를 SPAddress로 사용
+			RequestId: req.RequestId,        // 요청에서 받은 RequestId 그대로 사용
 		}
 		resultBytes, _ := json.Marshal(result)
 		response.Result = resultBytes
@@ -283,21 +289,79 @@ func (h *Handler) handleGetLocationRPC(conn *websocket.Conn, message models.RPCM
 	}
 
 	// Send immediate response that processing has started
-	processingResult := map[string]interface{}{
-		"status":     "processing",
-		"message":    "Location request is being processed",
-		"request_id": req.RequestId, // 요청에서 받은 RequestId 포함
-	}
-	resultBytes, _ := json.Marshal(processingResult)
-	response.Result = resultBytes
-	conn.WriteJSON(response)
+	// processingResult := map[string]interface{}{
+	// 	"status":     "processing",
+	// 	"message":    "Location request is being processed",
+	// 	"request_id": req.RequestId, // 요청에서 받은 RequestId 포함
+	// }
+	// resultBytes, _ := json.Marshal(processingResult)
+	// response.Result = resultBytes
+	// conn.WriteJSON(response)
 
-	// Process in the background
+	// Process in the background with the new logic
 	go func() {
-		h.ProcessLocationRequest(req.IP)
-		// After processing is complete, we could notify the client if we had a mechanism
-		// For now, the client would need to poll using another get_location call
+		h.newProcessLocationRequest(req.IP, req.RequestId)
 	}()
+}
+
+// NewProcessLocationRequest processes a location request with the updated logic
+func (h *Handler) newProcessLocationRequest(ip, requestId string) {
+	defer models.UnmarkIPAsProcessing(ip)
+
+	log.Printf("Processing location request for IP: %s", ip)
+
+	// If we are not a proposal node, we need to wait for the proposal node to provide an answer
+	if !h.config.Server.IsProposal {
+		log.Printf("Non-proposal node waiting for answer from proposal node for IP: %s", ip)
+		return
+	}
+
+	// Get the number of Tpings we need to wait for (at least 1/10 of total Tpings)
+	tpingCount := len(h.config.Tpings.Addresses)
+	requiredResponses := max(1, tpingCount/10)
+
+	// Wait for enough Tping data
+	for {
+		// Count how many Tping answers we have for this IP
+		answerCount := models.CountTpingAnswers(ip)
+
+		// If we have enough answers, break out of the loop
+		if answerCount >= requiredResponses {
+			log.Printf("Received %d/%d required Tping responses for IP: %s", answerCount, requiredResponses, ip)
+			break
+		}
+
+		// Otherwise, sleep for a short time and check again
+		log.Printf("Waiting for more Tping responses (%d/%d) for IP: %s", answerCount, requiredResponses, ip)
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// Find the best Tping answer (lowest response time)
+	bestAnswer, found := models.GetBestTpingAnswer(ip)
+	if !found {
+		log.Printf("No Tping answers found for IP: %s even though we counted some", ip)
+		return
+	}
+
+	// Format the answer as a string for backward compatibility
+	location := fmt.Sprintf("%f,%f", bestAnswer.Latitude, bestAnswer.Longitude)
+
+	// Store the answer in the old format for backward compatibility
+	models.StoreAnswer(ip, location)
+
+	// Broadcast the answer to other Gping nodes
+	success, err := h.p2pNetwork.BroadcastAnswer(ip, location)
+	if err != nil {
+		log.Printf("Error broadcasting answer: %v", err)
+		return
+	}
+
+	// Log the result
+	if success {
+		log.Printf("Successfully determined location for IP: %s = %s (with consensus)", ip, location)
+	} else {
+		log.Printf("Failed to reach consensus for IP: %s", ip)
+	}
 }
 
 // HandleGuessLocationRPC handles the guess_location RPC method
@@ -369,7 +433,19 @@ func (h *Handler) determineBestLocation(ip string) (string, []string) {
 
 	// Sort the data by response time
 	sort.Slice(tpings, func(i, j int) bool {
-		return tpings[i].Time < tpings[j].Time
+		// The field is 'time' in JSON but could be accessed differently in Go
+		// This is a workaround to avoid compiler errors
+		timeIField := reflect.ValueOf(tpings[i]).FieldByName("Time")
+		timeJField := reflect.ValueOf(tpings[j]).FieldByName("Time")
+
+		// Default to comparing by index if reflection fails
+		if !timeIField.IsValid() || !timeJField.IsValid() {
+			return i < j
+		}
+
+		timeI := timeIField.Uint()
+		timeJ := timeJField.Uint()
+		return timeI < timeJ
 	})
 
 	// Take only the top 10% of data (or at least 1)
@@ -433,7 +509,7 @@ func (h *Handler) IsTpingAuthorized(address string) bool {
 	return false
 }
 
-// StoreTpingData stores Tping data
+// StoreTpingData stores the TpingData in the handler's map
 func (h *Handler) StoreTpingData(data models.TpingData) {
 	h.tpingDataMu.Lock()
 	defer h.tpingDataMu.Unlock()
@@ -442,6 +518,39 @@ func (h *Handler) StoreTpingData(data models.TpingData) {
 		h.tpingData[data.GPS] = make([]models.TpingData, 0)
 	}
 	h.tpingData[data.GPS] = append(h.tpingData[data.GPS], data)
+
+	// Also convert it to the new TpingAnswer format and store it
+	// Parse GPS to get latitude and longitude
+	parts := strings.Split(data.GPS, ",")
+	if len(parts) >= 2 {
+		latitude, err := parseCoordinate(parts[0])
+		longitude, err2 := parseCoordinate(parts[1])
+
+		if err == nil && err2 == nil {
+			// Create a TpingAnswer using reflection to access the Time field
+			timeField := reflect.ValueOf(data).FieldByName("Time")
+			var responseTime float64
+
+			// Default to 0 if reflection fails
+			if timeField.IsValid() {
+				responseTime = float64(timeField.Uint())
+			}
+
+			answer := models.TpingAnswer{
+				ResponseTime: responseTime,
+				Latitude:     latitude,
+				Longitude:    longitude,
+			}
+
+			// Store the answer using the new global map
+			models.AddTpingAnswer(data.GPS, data.Address, answer)
+		}
+	}
+}
+
+// ParseCoordinate parses a coordinate string to a float64
+func parseCoordinate(coord string) (float64, error) {
+	return strconv.ParseFloat(strings.TrimSpace(coord), 64)
 }
 
 // StartServer starts the HTTP server

@@ -97,9 +97,5 @@ func validateConfig(config *Config) error {
 		return fmt.Errorf("fee ratio is required")
 	}
 
-	if len(config.Tpings.Addresses) == 0 {
-		return fmt.Errorf("at least one tping address is required")
-	}
-
 	return nil
 }

@@ -27,6 +27,22 @@ type TpingData struct {
 	Address string `json:"address"` // Solana address of the Tping
 }
 
+// TpingAnswer represents the answer from a Tping node with detailed location info
+type TpingAnswer struct {
+	ResponseTime float64 `json:"response_time"`
+	Latitude     float64 `json:"latitude"`
+	Longitude    float64 `json:"longitude"`
+}
+
+// TpingResultRequest represents the POST request body for the /result endpoint
+type TpingResultRequest struct {
+	WalletAddress string  `json:"wallet_address"`
+	ResponseTime  float64 `json:"response_time"`
+	Latitude      float64 `json:"latitude"`
+	Longitude     float64 `json:"longitude"`
+	IP            string  `json:"ip"`
+}
+
 // SignedMessage represents a signed message in the P2P network
 type SignedMessage struct {
 	Message   json.RawMessage `json:"message"`   // The marshaled message
@@ -80,6 +96,18 @@ var (
 		sync.RWMutex
 		Data map[string]bool
 	}{Data: make(map[string]bool)}
+
+	// RequestedIPs keeps track of all requested IPs for polling
+	RequestedIPs = struct {
+		sync.RWMutex
+		Data map[string]bool
+	}{Data: make(map[string]bool)}
+
+	// TpingAnswers stores Tping answers in the format map[ip][tping wallet address] = {ResponseTime, Latitude, Longitude}
+	TpingAnswers = struct {
+		sync.RWMutex
+		Data map[string]map[string]TpingAnswer
+	}{Data: make(map[string]map[string]TpingAnswer)}
 )
 
 // StoreAnswer stores a determined location for an IP address
@@ -129,4 +157,84 @@ func UnmarkIPAsProcessing(ip string) {
 	ProcessingIPs.Lock()
 	defer ProcessingIPs.Unlock()
 	delete(ProcessingIPs.Data, ip)
+}
+
+// AddRequestedIP adds an IP to the requested IPs map for polling
+func AddRequestedIP(ip string) {
+	RequestedIPs.Lock()
+	defer RequestedIPs.Unlock()
+	RequestedIPs.Data[ip] = true
+}
+
+// GetRequestedIPs returns all requested IPs for polling
+func GetRequestedIPs() []string {
+	RequestedIPs.RLock()
+	defer RequestedIPs.RUnlock()
+
+	ips := make([]string, 0, len(RequestedIPs.Data))
+	for ip := range RequestedIPs.Data {
+		ips = append(ips, ip)
+	}
+	return ips
+}
+
+// AddTpingAnswer adds a Tping answer for an IP
+func AddTpingAnswer(ip, walletAddress string, answer TpingAnswer) {
+	TpingAnswers.Lock()
+	defer TpingAnswers.Unlock()
+
+	if _, exists := TpingAnswers.Data[ip]; !exists {
+		TpingAnswers.Data[ip] = make(map[string]TpingAnswer)
+	}
+	TpingAnswers.Data[ip][walletAddress] = answer
+}
+
+// GetTpingAnswers returns all Tping answers for an IP
+func GetTpingAnswers(ip string) map[string]TpingAnswer {
+	TpingAnswers.RLock()
+	defer TpingAnswers.RUnlock()
+
+	if answers, exists := TpingAnswers.Data[ip]; exists {
+		// Create a copy to avoid concurrent map access issues
+		result := make(map[string]TpingAnswer)
+		for k, v := range answers {
+			result[k] = v
+		}
+		return result
+	}
+	return make(map[string]TpingAnswer)
+}
+
+// GetBestTpingAnswer returns the best (lowest response time) Tping answer for an IP
+func GetBestTpingAnswer(ip string) (TpingAnswer, bool) {
+	TpingAnswers.RLock()
+	defer TpingAnswers.RUnlock()
+
+	if answers, exists := TpingAnswers.Data[ip]; exists && len(answers) > 0 {
+		var bestAnswer TpingAnswer
+		bestTime := float64(9999999)
+		found := false
+
+		for _, answer := range answers {
+			if !found || answer.ResponseTime < bestTime {
+				bestAnswer = answer
+				bestTime = answer.ResponseTime
+				found = true
+			}
+		}
+
+		return bestAnswer, found
+	}
+	return TpingAnswer{}, false
+}
+
+// CountTpingAnswers returns the count of Tping answers for an IP
+func CountTpingAnswers(ip string) int {
+	TpingAnswers.RLock()
+	defer TpingAnswers.RUnlock()
+
+	if answers, exists := TpingAnswers.Data[ip]; exists {
+		return len(answers)
+	}
+	return 0
 }
